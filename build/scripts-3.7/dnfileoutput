@@ -1,5 +1,5 @@
-#!/data/anaconda/envs/DLEnv/bin/python
-from hagelslag.util.make_proj_grids import * 
+#!/home/tmp/aburke/miniconda3/envs/deephail/bin/python
+#from hagelslag.util.make_proj_grids import * 
 from scipy.ndimage import gaussian_filter
 import matplotlib
 import matplotlib.pyplot as plt

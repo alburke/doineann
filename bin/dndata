@@ -1,4 +1,4 @@
-#!/home/tmp/aburke/miniconda3/envs/deephail/bin/python
+#!/usr/bin/env python
 from processing.DLProcessing import DLPreprocessing
 from util.Config import Config
 from multiprocessing import Pool
@@ -24,7 +24,7 @@ def main():
     required = ['dates','start_hour','end_hour','ensemble_members','model_path', 
                 'ensemble_name','mrms_path','mrms_variable','storm_variables',
                 'potential_variables','model_map_file','hf_path','patch_radius',
-                'train','single_step'] 
+                'train']
     #Add attributes of dict to config
     config = Config(args.config, required_attributes=required)
     if not hasattr(config, "run_date_format"):
@@ -41,22 +41,20 @@ def main():
     dlprocess = DLPreprocessing(config.ensemble_name,config.model_path,
         config.hf_path,config.patch_radius,config.run_date_format,
         forecast_variables,config.storm_variables, config.potential_variables,
-        config.mask)
+        config.start_hour,config.end_hour,config.mask)
     #Process map data
     dlprocess.process_map_data(config.model_map_file)
     #Process obs and ensemble data with parallelization
     pool = Pool(args.proc)
     for run_date in config.dates:
+        for member in config.ensemble_members:
+            member_path = '{0}/{1}'.format(config.hf_path,member)
+            if not os.path.exists(member_path): os.makedirs(member_path)
+            pool.apply_async(dlprocess.process_ensemble_member, 
+                (run_date,member,config.hf_path,config.model_map_file))
         if args.obs or config.train is True:
             pool.apply_async(dlprocess.process_observational_data, 
-                (run_date,config.start_hour,config.end_hour,config.mrms_variable,config.mrms_path))
-        if config.train is True: 
-            for member in config.ensemble_members:
-                member_path = '{0}/{1}'.format(config.hf_path,member)
-                if not os.path.exists(member_path): os.makedirs(member_path)
-                pool.apply_async(dlprocess.process_ensemble_member, 
-                    (run_date,member,config.hf_path,config.model_map_file,
-                    config.start_hour,config.end_hour,config.single_step))
+                (run_date,config.mrms_variable,config.mrms_path))
     pool.close()
     pool.join()
     return

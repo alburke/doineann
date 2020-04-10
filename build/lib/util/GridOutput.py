@@ -21,7 +21,8 @@ Advances in Modeling and Analysis Using Python, New Orleans, LA, Amer. Meteor. S
 
 class GridOutput(object):
     def __init__(self,run_date,start_date,end_date,member=None):
-        self.run_date = np.datetime64(run_date)
+        self.run_date = pd.to_datetime(str(run_date))
+        self.member = member
         self.valid_dates = pd.date_range(
             start=start_date,end=end_date,freq='1H')
         self.unknown_names = {3: "LCDC", 4: "MCDC", 5: "HCDC", 6: "Convective available potential energy", 7: "Convective inhibition", 
@@ -32,8 +33,9 @@ class GridOutput(object):
                             221: "m s**-1", 222: "m s**-1", 223: "m s**-1"}
         self.forecast_hours = np.arange((start_date-run_date).total_seconds() / 3600,
                                         (end_date-run_date).total_seconds() / 3600 + 1, dtype=int)
-    
+
     def find_data_files(self,model_path):
+        filenames = []
         day_before_date = (self.run_date-timedelta(days=1)).strftime("%Y%m%d") 
         member_name = str(self.member.split("_")[0])
         if '00' in self.member:
@@ -73,22 +75,21 @@ class GridOutput(object):
         if len(file_objects) <1: 
             print("No {0} model runs on {1}".format(self.member,self.run_date))
             units = None
-            return self.data, units
-
+            return data
         for f, g_file in enumerate(file_objects):
-            if type(self.variable) is int:
+            if type(model_variable) is int:
                 grib = pygrib.open(file)
-                data_values = grib[self.variable].values
-                if grib[self.variable].units == 'unknown':
-                    Id = grib[self.variable].parameterNumber
+                data_values = grib[model_variable].values
+                if grib[model_variable].units == 'unknown':
+                    Id = grib[model_variable].parameterNumber
                     units = self.unknown_units[Id] 
                 else:
-                    units = grib[self.variable].units
+                    units = grib[model_variable].units
                 grib.close()
-            elif type(self.variable) is str:
-                if '_' in self.variable:
-                    variable = self.variable.split('_')[0]
-                    level = self.variable.split('_')[1]
+            elif type(model_variable) is str:
+                if '_' in model_variable:
+                    variable = model_variable.split('_')[0]
+                    level = model_variable.split('_')[1]
                     if variable in self.unknown_names.values():
                         Id, units = self.format_grib_name(variable)
                         grib = pygrib.index(g_file,'parameterNumber','level' )
@@ -97,21 +98,20 @@ class GridOutput(object):
                     else:
                         grib = pygrib.index(g_file,'name','level')
                         data_values = grib.select(name=variable, level=int(level))[0].values
-                        units = grib.select(name=variable, level=int(level))[0].units
                         grib.close()
                 else:   
-                    if self.variable in self.unknown_names.values():
-                        Id, units = self.format_grib_name(self.variable)
+                    if model_variable in self.unknown_names.values():
+                        Id, units = self.format_grib_name(model_variable)
                         grib = pygrib.index(g_file,'parameterNumber')
                         data_values = grib.select(parameterNumber=Id)[0].values
                         grib.close()
                     else:
                         grib = pygrib.index(g_file,'name')
-                        if len(grib.select(name=self.variable)) > 1:
-                            raise NameError("Multiple '{0}' records found. Rename with level:'{0}_level'".format(self.variable))
+                        if len(grib.select(name=model_variable)) > 1:
+                            raise NameError("Multiple '{0}' records found. Rename with level:'{0}_level'".format(model_variable))
                         else:
-                            data_values = grib.select(name=self.variable)[0].values
-                            units = grib.select(name=self.variable)[0].units
+                            data_values = grib.select(name=model_variable)[0].values
+                            units = grib.select(name=model_variable)[0].units
                         grib.close()
             if data is None:
                 data = np.empty((len(self.valid_dates), data_values.shape[0], data_values.shape[1]), dtype=float)
@@ -119,7 +119,7 @@ class GridOutput(object):
             else:
                 data[f]=data_values[:]
         return data
-
+        
     def format_grib_name(self,selected_variable):
         """
         Assigns name to grib2 message number with name 'unknown'. Names based on NOAA grib2 abbreviations.
@@ -162,21 +162,19 @@ class GridOutput(object):
         Loads data files and stores the output in the data attribute.
         """
         data = []
-        
         next_date = (self.run_date+timedelta(days=1)).strftime("%Y%m%d") 
         filename_args = "{0}/{1}/*{2}*.nc"
-
         obs_file = [glob(filename_args.format(obs_path,obs_variable,date))[0] 
-                    for date in [self.run_date,next_date]
-                    if len(glob(filename_args.format(obs_path,obs_variable,date))) >1]  
+                    for date in [self.run_date.strftime("%Y%m%d"),next_date]
+                    if len(glob(filename_args.format(obs_path,obs_variable,date)))>=1]  
         if len(obs_file) < 1: return None
-        for h,fore_hour in enumerate(self.valid_dates):
+        for h,fore_hour in enumerate(self.forecast_hours):
             if fore_hour <= 24:
                 obs_data = Dataset(obs_file[0])
-                data.append(obs_data.variables[obs_variable][fore_hour])
+                data.append(obs_data.variables[obs_variable][h])
             else:
                 obs_data = Dataset(obs_file[1])
-                data.append(obs_data.variables[obs_variable][fore_hour%24])
+                data.append(obs_data.variables[obs_variable][h%13])
         data = np.array(data)
         data[data < 0] = 0
         data[data > 150] = 150

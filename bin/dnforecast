@@ -1,6 +1,6 @@
-#!/home/tmp/aburke/miniconda3/envs/deephail/bin/python
-from hagelslag.processing.DLModeler import DLModeler
-from hagelslag.util.Config import Config
+#!/usr/bin/env python
+from processing.DLModeler import DLModeler
+from util.Config import Config
 #from keras import models
 import argparse, pdb
 import pandas as pd

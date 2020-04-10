@@ -1,7 +1,7 @@
 #from hagelslag.util.make_proj_grids import make_proj_grids, read_ncar_map_file
 #from hagelslag.data.ModelOutput import ModelOutput
 #from hagelslag.data.MRMSGrid import MRMSGrid
-from processing.GridOutput import *
+from util.GridOutput import *
 from datetime import timedelta
 import pandas as pd
 import numpy as np
@@ -13,7 +13,8 @@ class DLPreprocessing(object):
     def __init__(self,ensemble_name,model_path,
         hf_path,patch_radius,run_date_format,
         forecast_variables,storm_variables,
-        potential_variables,mask=None):
+        potential_variables,start_hour,end_hour,
+        mask=None):
         
         self.ensemble_name = ensemble_name
         self.model_path = model_path
@@ -23,7 +24,10 @@ class DLPreprocessing(object):
         self.forecast_variables = forecast_variables
         self.storm_variables = storm_variables
         self.potential_variables = potential_variables
+        self.start_hour= start_hour
+        self.end_hour=end_hour
         self.mask = mask
+
         return
 
     def process_map_data(self,map_file):
@@ -46,8 +50,7 @@ class DLPreprocessing(object):
                 compression='gzip',compression_opts=6)
         return 
 
-    def process_observational_data(self,run_date,start_hour,end_hour,
-        mrms_variable, mrms_path):
+    def process_observational_data(self,run_date,mrms_variable,mrms_path):
         """
         Process observational data by both slicing the data and labeling
         MESH values at different thresholds for classification modeling. 
@@ -58,15 +61,15 @@ class DLPreprocessing(object):
             run_date(datetime): datetime object containing date of mrms data
             config(obj): Config object containing member parameters
         """
+        obs_patch_labels = []
+        
         print("Starting obs process", run_date)
         #Find start and end date given the start and end hours 
-        start_date = run_date + timedelta(hours=start_hour)
-        end_date = run_date + timedelta(hours=end_hour)
-        obs_patch_labels = []
+        start_date = run_date + timedelta(hours=self.start_hour)
+        end_date = run_date + timedelta(hours=self.end_hour)
         #Create gridded mrms object 
-        gridded_obs = MRMSGrid(start_date,end_date,mrms_variable,mrms_path)
-        gridded_obs.load_data()
-        gridded_obs_data = gridded_obs.data
+        gridded_obj = GridOutput(run_date,start_date,end_date)
+        gridded_obs_data = gridded_obj.load_obs_data(mrms_variable,mrms_path)
         if len(gridded_obs_data) < 1: 
             print('No observations on {0}'.format(start_date))
             return
@@ -88,8 +91,7 @@ class DLPreprocessing(object):
             compression='gzip',compression_opts=6)
         return 
 
-    def process_ensemble_member(self,run_date,member,member_path,map_file,
-        start_hour,end_hour,single_step):
+    def process_ensemble_member(self,run_date,member,member_path,map_file):
         """
         Slice ensemble data in the format (# of hours,x,y)
         Args:
@@ -99,50 +101,44 @@ class DLPreprocessing(object):
             lon_lat_file (str): path to the member map file
             config(obj): Config object containing member parameters
         """
-        try:
-            #Create list of forecast variable strings 
-            start_date = run_date + timedelta(hours=start_hour)
-            end_date = run_date + timedelta(hours=end_hour)
+        #Find start and end date given the start and end hours 
+        start_date = run_date + timedelta(hours=self.start_hour)
+        end_date = run_date + timedelta(hours=self.end_hour)
+        #Create gridded variable object 
+        gridded_obj = GridOutput(run_date,start_date,end_date,member)
+
+        print("Starting ens processing", member, run_date)
+        #Slice each member variable separately over each hour
+        for v,variable in enumerate(self.forecast_variables):
+            gridded_variable_data = gridded_obj.load_model_data(variable,self.model_path)
+            if gridded_variable_data is None: break 
+            hourly_var_patches = [] 
+            #Slice hourly data
+            for hour in np.arange(1,len(gridded_variable_data)):
+                #Storm variables are sliced at the current forecast hour
+                if variable in self.storm_variables:var_hour = hour
+                #Potential (environmental) variables are sliced at the previous forecast hour
+                elif variable in self.potential_variables:var_hour = hour-1
+                if self.mask is not None:masked_gridded_variable = gridded_variable_data[var_hour]*self.mask
+                else:masked_gridded_variable = gridded_variable_data[var_hour]
+                patches = self.slice_into_patches(masked_gridded_variable,self.patch_radius,self.patch_radius)
+                hourly_var_patches.append(patches)
+            
+            #Shorten variable names
+            if " " in variable: 
+                variable_name= ''.join([v[0].upper() for v in variable.split()]) + variable.split('_')[-1]
+            elif "_" in variable: 
+                variable_name= ''.join([v[0].upper() for v in variable.split()]) + variable.split('_')[-1]
+            else:variable_name = variable
+            var_filename = '{0}/{2}/{1}_{2}_{3}.h5'.format(member_path,
+                variable_name,member,run_date.strftime(self.run_date_format)) 
+            print('Writing model file: {0}'.format(var_filename))
+            #Write file out using Hierarchical Data Format 5 (HDF5) format. 
+            with h5py.File(var_filename, 'w') as hf:
+                hf.create_dataset("patches",data=np.array(hourly_var_patches),
+                compression='gzip',compression_opts=6)
         
-            print("Starting ens processing", member, run_date)
-            #Slice each member variable seperately over each hour
-            for v,variable in enumerate(self.forecast_variables):
-                #Create gridded variable object 
-                gridded_variable = ModelOutput(self.ensemble_name,member,run_date,variable,
-                        start_date,end_date,self.model_path,map_file,single_step=single_step)
-                gridded_variable.load_data() 
-                if gridded_variable.data is None: break 
-                hourly_var_patches = [] 
-                #Slice hourly data
-                for hour in np.arange(1,len(gridded_variable.data)):
-                    #Storm variables are sliced at the current forecast hour
-                    if variable in self.storm_variables:var_hour = hour
-                    #Potential (environmental) variables are sliced at the previous forecast hour
-                    elif variable in self.potential_variables:var_hour = hour-1
-                    if self.mask is not None:masked_gridded_variable = gridded_variable.data[var_hour]*self.mask
-                    else:masked_gridded_variable = gridded_variable.data[var_hour]
-                    patches = self.slice_into_patches(masked_gridded_variable,self.patch_radius,self.patch_radius)
-                    hourly_var_patches.append(patches)
-                #Shorten variable names
-                if " " in variable: 
-                    variable_name= ''.join([v[0].upper() for v in variable.split()]) + variable.split('_')[-1]
-                elif "_" in variable: 
-                    variable_name= ''.join([v[0].upper() for v in variable.split()]) + variable.split('_')[-1]
-                else:variable_name = variable
-                var_filename = '{0}/{2}/{1}_{2}_{3}.h5'.format(member_path,
-                                                variable_name,
-                                                member,
-                                                run_date.strftime(self.run_date_format)) 
-                print('Writing model file: {0}'.format(var_filename))
-                #Write file out using Hierarchical Data Format 5 (HDF5) format. 
-                with h5py.File(var_filename, 'w') as hf:
-                    hf.create_dataset("patches",data=np.array(hourly_var_patches),
-                    compression='gzip',compression_opts=6)
-        
-        except Exception as e:
-            print(traceback.format_exc())
-            raise e
-    
+             
         return
 
     def slice_into_patches(self,data2d, patch_ny, patch_nx):
