@@ -1,0 +1,10 @@
+numpy>=1.9
+pandas>=0.15
+scipy
+matplotlib
+keras
+h5py
+netcdf4
+pyproj
+pygrib
+cartopy
