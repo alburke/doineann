@@ -1,6 +1,6 @@
-from hagelslag.util.make_proj_grids import make_proj_grids, read_ncar_map_file
+from util.make_proj_grids import make_proj_grids, read_ncar_map_file
 from scipy.spatial import cKDTree
-from datetime import timedelta
+from sklearn.utils import shuffle
 from glob import glob
 import pandas as pd
 import numpy as np
@@ -8,17 +8,18 @@ import random
 import h5py
 import os
 
-from sklearn.utils import shuffle
-
+#Parallelization packages
 from dask.distributed import Client, progress
 import dask.array as da
 import dask
 
-#from keras.optimizers import SGD, Adam
-#from keras.regularizers import l2
-#import keras.backend as K
+#Deep learning packages
+import tensorflow as tf
 #from keras import layers
 #from keras import models
+#from keras.optimizers import Adam
+#from keras.regularizers import l2
+#import keras.backend as K
 
 class DLModeler(object):
     def __init__(self,model_path,hf_path,start_dates,end_dates,
@@ -128,7 +129,7 @@ class DLModeler(object):
                 obs_file = glob(self.hf_path + '/*obs*{0}*'.format(str_date))
                 if len(model_file) < 1 or len(obs_file) < 1:continue
                 #Open obs file
-                data = h5py.File(obs_file[0], 'r')['labels'][()]
+                data = h5py.File(obs_file[0], 'r')['data'][()]
                 hourly_data = {}
                 for hour in np.arange(data.shape[0]):
                     inds = np.where(data[hour] == category)[0]
@@ -136,30 +137,33 @@ class DLModeler(object):
                 if hourly_data: single_date_obs[str_date] = hourly_data
             if single_date_obs: all_date_obs_catetories[category] = single_date_obs
         
-        #Find the number of desired examples per category
-        num_examples_obs_categories = [] 
-        for class_label,percentage in self.class_percentage.items():
-            subset_class_examples = int(self.num_examples*percentage)
-            total_class_examples = all_date_obs_catetories[class_label]
-            if len(total_class_examples) < subset_class_examples:data_augment = 1
-            else:data_augment = 0
-            for e in np.arange(subset_class_examples):
-                #Choose random dates, hours, and patches for training
-                random_date = np.random.choice(list(total_class_examples))
-                random_hour = np.random.choice(list(total_class_examples[random_date]))
-                random_patch = np.random.choice(list(total_class_examples[random_date][random_hour]))
-                num_examples_obs_categories.append([random_date,random_hour,random_patch,class_label,data_augment])
+        try:
+            #Find the number of desired examples per category
+            num_examples_obs_categories = [] 
+            for class_label,percentage in self.class_percentage.items():
+                subset_class_examples = int(self.num_examples*percentage)
+                total_class_examples = all_date_obs_catetories[class_label]
+                if len(total_class_examples) < subset_class_examples:data_augment = 1
+                else:data_augment = 0
+                for e in np.arange(subset_class_examples):
+                    #Choose random dates, hours, and patches for training
+                    random_date = np.random.choice(list(total_class_examples))
+                    random_hour = np.random.choice(list(total_class_examples[random_date]))
+                    random_patch = np.random.choice(list(total_class_examples[random_date][random_hour]))
+                    num_examples_obs_categories.append([random_date,random_hour,random_patch,class_label,data_augment])
         
-        #Output dataframe with the randomly chosen data
-        cols = ['Random Date','Random Hour', 'Random Patch', 'Obs Label','Data Augmentation'] 
-        pandas_df_examples = pd.DataFrame(num_examples_obs_categories,columns=cols)
-        pandas_df_examples = shuffle(pandas_df_examples)
-        pandas_df_examples.reset_index(inplace=True, drop=True)
-        print(pandas_df_examples)
-        print('\nWriting to {0}\n'.format(training_filename))
-        pandas_df_examples.to_csv(training_filename)
-        return pandas_df_examples 
-    
+            #Output dataframe with the randomly chosen data
+            cols = ['Random Date','Random Hour', 'Random Patch', 'Obs Label','Data Augmentation'] 
+            pandas_df_examples = pd.DataFrame(num_examples_obs_categories,columns=cols)
+            pandas_df_examples = shuffle(pandas_df_examples)
+            pandas_df_examples.reset_index(inplace=True, drop=True)
+            print(pandas_df_examples)
+            print('\nWriting to {0}\n'.format(training_filename))
+            pandas_df_examples.to_csv(training_filename)
+            return pandas_df_examples 
+        except:
+            print('No training data found')
+            raise
     def read_files(self,mode,member,dates,hour=None,patch=None,data_augment=None): 
         """
         Function to read pre-processed model data for each individual predictor
@@ -217,7 +221,7 @@ class DLModeler(object):
             patch_data = np.zeros( (self.patch_radius,self.patch_radius,len(self.forecast_variables)) ) 
         else: 
             #Forecast patch data (hours,#patches,ny,nx,#variables) 
-            data_shape = h5py.File(files[0],'r')['patches'].shape+(len(self.forecast_variables),)
+            data_shape = h5py.File(files[0],'r')['data'].shape+(len(self.forecast_variables),)
             patch_data = np.empty( data_shape )*np.nan
         
         for v,variable_file in enumerate(files):
@@ -225,11 +229,11 @@ class DLModeler(object):
                 if mode =='train':
                     if data_augment > 0.5:
                         #Augment data by adding small amounts of variance
-                        var_data = hf['patches'][hour,patch,:,:].ravel()
+                        var_data = hf['data'][hour,patch,:,:].ravel()
                         noise = np.nanvar(var_data)*np.random.choice(np.arange(-0.5,0.5,0.15))
                         patch_data[:,:,v] = (var_data + noise).reshape((self.patch_radius,self.patch_radius))
-                    else: patch_data[:,:,v] = hf['patches'][hour,patch,:,:]
-                else: patch_data[:,:,:,:,v] = hf['patches'][()]
+                    else: patch_data[:,:,v] = hf['data'][hour,patch,:,:]
+                else: patch_data[:,:,:,:,v] = hf['data'][()]
         return patch_data
     
     def standardize_data(self,member,model_data):
@@ -288,38 +292,29 @@ class DLModeler(object):
 
         #Initiliaze Convolutional Neural Net (CNN)
         model = models.Sequential()
-        l2_a= 0.001
+        
+        #l2_a= 0.001
+        
         #First layer, input shape (y,x,# variables) 
         model.add(layers.Conv2D(32, (5, 5), activation='relu', 
-            kernel_regularizer=l2(l2_a),
-            padding='same',input_shape=(np.shape(model_data[0]))))
-        model.add(layers.Conv2D(32, (5,5),kernel_regularizer=l2(l2_a),
-            activation='relu',padding='same'))
-        model.add(layers.Dropout(0.3))
-        model.add(layers.MaxPooling2D())
+            input_shape=(np.shape(model_data[0]))))
+        model.add(layers.Conv2D(32, (5,5),activation='relu'))
+        model.add(layers.AveragePooling2D())
         #Second layer
-        model.add(layers.Conv2D(64, (5, 5), 
-            kernel_regularizer=l2(l2_a),activation='relu',padding='same'))
-        model.add(layers.Conv2D(64, (5,5), 
-            kernel_regularizer=l2(l2_a),activation='relu',padding='same'))
-        model.add(layers.Dropout(0.3))
-        model.add(layers.MaxPooling2D())
+        model.add(layers.Conv2D(64, (3, 3),activation='relu'))
+        model.add(layers.AveragePooling2D())
         #Third layer
-        model.add(layers.Conv2D(128, (5, 5), 
-            kernel_regularizer=l2(l2_a),activation='relu',padding='same'))
-        model.add(layers.Conv2D(128, (5,5), 
-            kernel_regularizer=l2(l2_a),activation='relu',padding='same'))
-        model.add(layers.Dropout(0.3))
-        model.add(layers.MaxPooling2D())
+        model.add(layers.Conv2D(128, (3,3),activation='relu'))
+        model.add(layers.AveragePooling2D())
     
         #Flatten the last convolutional layer into a long feature vector
         model.add(layers.Flatten())
-        model.add(layers.Dense(128, activation='relu'))
+        model.add(layers.Dense(512, activation='relu'))
         model.add(layers.Dense(4, activation='softmax'))
 
         #Compile neural net
-        opt = Adam()
-        model.compile(optimizer=opt,loss='categorical_crossentropy',metrics=['acc'])
+        #opt = Adam()
+        model.compile(optimizer='adam',loss='categorical_crossentropy',metrics=[tf.keras.metrics.AUC()])
         batches = int(self.num_examples/20.0)
         print(batches)
         conv_hist = model.fit(model_data, model_labels, epochs=20, batch_size=batches,validation_split=0.1)
@@ -351,7 +346,7 @@ class DLModeler(object):
 
         #Open mapfile over subset domain (CONUS)
         subset_map_file = glob(self.hf_path+'/*map*.h5')[0] 
-        subset_data = h5py.File(subset_map_file, 'r')['map_data']
+        subset_data = h5py.File(subset_map_file, 'r')['data']
         #Convert subset grid points to total grid using cKDtree
         _,inds = tree.query(np.c_[subset_data[0].ravel(),subset_data[1].ravel()])
         
@@ -379,8 +374,9 @@ class DLModeler(object):
         #Write file out gridded forecasts using Hierarchical Data Format 5 (HDF5) format. 
         final_grid_shape = (forecasts.shape[0],forecasts.shape[1],)+mapping_data['lat'].shape
         return gridded_predictions.reshape(final_grid_shape)
-
+'''
 def brier_skill_score_keras(obs, preds):
     bs = k.mean((preds - obs) ** 2)
     climo = k.mean((obs - k.mean(obs)) ** 2)
     return 1.0 - (bs/climo)
+'''

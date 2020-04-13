@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-#from hagelslag.util.make_proj_grids import * 
+from util.make_proj_grids import * 
 from scipy.ndimage import gaussian_filter
 import matplotlib
 import matplotlib.pyplot as plt
@@ -56,56 +56,53 @@ def main():
         if len(forecast_grid[0]) < 1:
             print('No grib hail forecasts found {0}'.format(date.strftime('%Y%m%d')))
             continue
-        else:
-            for s,size_forecast in enumerate(thresholds):
-                print('\n{0} mm forecasts'.format(size_forecast))
-                if args.grib_out: 
-                    date_outpath = outpath+'grib/'
-                    if not os.path.exists(date_outpath):
-                        os.makedirs(date_outpath)
-                    print("Daily probabilitiy grib files")
-                    write_grib2_file(forecast_grid[s,:,:,:],0,24,args.map_file,date,
+        
+        for s,size_forecast in enumerate(thresholds):
+            print('\n{0} mm forecasts'.format(size_forecast))
+            if args.grib_out: 
+                date_outpath = outpath+'grib/'
+                if not os.path.exists(date_outpath): os.makedirs(date_outpath)
+                print("Daily probabilitiy grib files")
+                write_grib2_file(forecast_grid[s,:,:,:],0,24,args.map_file,date,
                     date_outpath,"{0}mm".format(size_forecast),args.ens,smoothing) 
-                if args.netcdf_out: 
-                    date_outpath = outpath+'netcdf/'
-                    if not os.path.exists(date_outpath):
-                        os.makedirs(date_outpath)
-                    print("Daily probabilitiy nc files")
-                    write_netcdf_file(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
-                        mapping_data['lat'],date_outpath,"{0}mm".format(size_forecast),
-                        args.ens,smoothing)
-                if args.plot_out: 
-                    date_outpath = outpath+'png/'
-                    if not os.path.exists(date_outpath):
-                        os.makedirs(date_outpath)
-                    print("Daily probabilitiy plots")
-                    plot_period_prob(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
-                        mapping_data['lat'],date_outpath,"{0}mm".format(size_forecast),
-                        args.ens,smoothing)
+            if args.netcdf_out: 
+                date_outpath = outpath+'netcdf/'
+                if not os.path.exists(date_outpath): os.makedirs(date_outpath)
+                print("Daily probabilitiy nc files")
+                write_netcdf_file(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
+                    mapping_data['lat'],date_outpath,"{0}mm".format(size_forecast),
+                    args.ens,smoothing)
+            if args.plot_out: 
+                date_outpath = outpath+'png/'
+                if not os.path.exists(date_outpath): os.makedirs(date_outpath)
+                print("Daily probabilitiy plots")
+                plot_period_prob(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
+                    mapping_data['lat'],date_outpath,"{0}mm".format(size_forecast),
+                    args.ens,smoothing)
                 
                 
-                print()
-                if args.hourly: 
-                    for hour in range(4,21):
-                        if args.plot_out:
-                            date_outpath = outpath+'png/'
-                            print("Hourly probability plots")
-                            plot_period_prob(forecast_grid[s,:,:,:],hour,(hour+4),
-                                date,mapping_data['lon'],mapping_data['lat'],date_outpath,
+            print()
+            if args.hourly: 
+                for hour in range(4,21):
+                    if args.plot_out:
+                        date_outpath = outpath+'png/'
+                        print("Hourly probability plots")
+                        plot_period_prob(forecast_grid[s,:,:,:],hour,(hour+4),
+                            date,mapping_data['lon'],mapping_data['lat'],date_outpath,
                                 "{0}mm".format(size_forecast),args.ens,smoothing)
-                        print()
-                        if args.grib_out: 
-                            date_outpath = outpath+'grib/'
-                            print("Hourly probabilitiy grib files")
-                            write_grib2_file(forecast_grid[s,:,:,:],hour,(hour+4),args.map_file,date,
-                                date_outpath,"{0}mm".format(size_forecast),args.ens,smoothing)
-                        print()
-                        if args.netcdf_out: 
-                            date_outpath = outpath+'netcdf/'
-                            print("Daily probabilitiy nc files")
-                            write_netcdf_file(forecast_grid[s,:,:,:],hour,(hour+4),date,
-                                mapping_data['lon'],mapping_data['lat'],date_outpath,
-                                "{0}mm".format(size_forecast),args.ens,smoothing)
+                    print()
+                    if args.grib_out: 
+                        date_outpath = outpath+'grib/'
+                        print("Hourly probabilitiy grib files")
+                        write_grib2_file(forecast_grid[s,:,:,:],hour,(hour+4),args.map_file,date,
+                            date_outpath,"{0}mm".format(size_forecast),args.ens,smoothing)
+                    print()
+                    if args.netcdf_out: 
+                        date_outpath = outpath+'netcdf/'
+                        print("Daily probabilitiy nc files")
+                        write_netcdf_file(forecast_grid[s,:,:,:],hour,(hour+4),date,
+                            mapping_data['lon'],mapping_data['lat'],date_outpath,
+                            "{0}mm".format(size_forecast),args.ens,smoothing)
                  
     return
 

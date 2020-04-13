@@ -1,11 +1,7 @@
-#from hagelslag.util.make_proj_grids import make_proj_grids, read_ncar_map_file
-#from hagelslag.data.ModelOutput import ModelOutput
-#from hagelslag.data.MRMSGrid import MRMSGrid
+from util.make_proj_grids import make_proj_grids, read_ncar_map_file
 from util.GridOutput import *
 from datetime import timedelta
-import pandas as pd
 import numpy as np
-import traceback
 import h5py
 import os
 
@@ -46,7 +42,7 @@ class DLPreprocessing(object):
             lon_lat_data = np.array((lon_slices,lat_slices))
             print('\nWriting map file: {0}\n'.format(lon_lat_file))
             with h5py.File(lon_lat_file, 'w') as hf:
-                hf.create_dataset("map_data",data=lon_lat_data,
+                hf.create_dataset("data",data=lon_lat_data,
                 compression='gzip',compression_opts=6)
         return 
 
@@ -84,10 +80,9 @@ class DLPreprocessing(object):
             obs_patch_labels.append(labels)
         obs_filename = '{0}/obs_{1}.h5'.format(self.hf_path,run_date.strftime(self.run_date_format)) 
         print('Writing obs file: {0}'.format(obs_filename))
-        
         #Write file out using Hierarchical Data Format 5 (HDF5) format. 
         with h5py.File(obs_filename, 'w') as hf:
-            hf.create_dataset("labels",data=obs_patch_labels,
+            hf.create_dataset("data",data=obs_patch_labels,
             compression='gzip',compression_opts=6)
         return 
 
@@ -135,10 +130,8 @@ class DLPreprocessing(object):
             print('Writing model file: {0}'.format(var_filename))
             #Write file out using Hierarchical Data Format 5 (HDF5) format. 
             with h5py.File(var_filename, 'w') as hf:
-                hf.create_dataset("patches",data=np.array(hourly_var_patches),
+                hf.create_dataset("data",data=np.array(hourly_var_patches),
                 compression='gzip',compression_opts=6)
-        
-             
         return
 
     def slice_into_patches(self,data2d, patch_ny, patch_nx):
@@ -155,7 +148,6 @@ class DLPreprocessing(object):
                     ny_patch -- the number of points in the patch (y-dimension)
                     nx_patch -- the number of points in the patch (x-dimension)
         '''
-
         #Determine the number of patches in each dimension
         x_patches = int(data2d.shape[0]/patch_nx)
         y_patches = int(data2d.shape[1]/patch_ny) 
