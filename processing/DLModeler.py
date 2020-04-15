@@ -90,20 +90,18 @@ class DLModeler(object):
                 for u,unique in enumerate(unique_obs_label):
                     if label == unique:
                         member_obs_label[l,u] = 1.0 
-            print('Writing out {0}'.format(obs_training_labels_filename))
             with h5py.File(obs_training_labels_filename, 'w') as hf:
-                hf.create_dataset("data",data=member_obs_label,
-                compression='gzip',compression_opts=6)
+                hf.create_dataset("data",data=member_obs_label)#,
+            print('Writing out {0}'.format(obs_training_labels_filename))
                 
             #Extracting model patch data
             member_model_data = self.read_files(mode,member,patches['Random Date'], 
                 patches['Random Hour'],patches['Random Patch'],patches['Data Augmentation'])
             if member_model_data is None: print('No training data found')
             else:
-                print('Writing out {0}'.format(model_training_data_filename))
                 with h5py.File(model_training_data_filename, 'w') as hf:
-                    hf.create_dataset("data",data=member_model_data,
-                    compression='gzip',compression_opts=6)
+                    hf.create_dataset("data",data=member_model_data)#,
+                print('Writing out {0}'.format(model_training_data_filename))
         
         return member_model_data,member_obs_label
     
@@ -198,12 +196,13 @@ class DLModeler(object):
             data_augment (str): Augmentation of random training patch, binary. 
         """
         total_patch_data = []
+
         
         #Start up parallelization
         pool = Pool(mp.cpu_count())
-        print('\nReading member files\n')
+        print('\nReading {0} unique member files\n'.format(len(np.unique(dates))))
         var_file = self.hf_path + '/{0}/*{1}*{2}*.h5'
-        for d,date in enumerate(dates):
+        for d,date in enumerate(np.unique(dates)):
             #Find all model variable files for a given date
             var_files = [glob(var_file.format(member,variable,date))[0]
                 for variable in self.forecast_variables 
@@ -212,20 +211,24 @@ class DLModeler(object):
             if len(var_files) < len(self.forecast_variables): continue
             #Extract training data 
             if mode == 'train':
-                if d%1000 == 0:print(d,date)
-                args = ('train',var_files,hour[d],patch[d],data_augment[d])
+                date_inds = np.where(dates == date)[0]    
+                if d%10 == 0:print(d,date)
+                args = (mode,var_files,hour[date_inds].values,
+                    patch[date_inds].values,data_augment[date_inds].values)
                 total_patch_data.append(pool.apply_async(self.extract_data,args))
             #Extract forecast data
-            elif mode =='forecast': total_patch_data.append(self.extract_data('forecast',var_files)) 
+            elif mode =='forecast': total_patch_data.append(self.extract_data(mode,var_files)) 
         pool.close()
         pool.join()
         
+        total_unique_patch_data  = [data for pool_file in total_patch_data for data in pool_file.get()]
         #If there are no data, return None
         if len(total_patch_data) <1: return None
-        elif mode=='train':return np.array([patch_data.get() for patch_data in total_patch_data])
+        elif mode=='train':return np.array(total_unique_patch_data)
+        #[patch_data[unique_date].get() for patch_data in total_patch_data for unique_date in np.arange(len(patch_data.get()))])
         else: return np.array(total_patch_data)[0]
-
-    def extract_data(self,mode,files,hour=None,patch=None,data_augment=None):
+        
+    def extract_data(self,mode,files,hours=None,patches=None,data_augment=None):
         """
         Function to extract training and forecast patch data
 
@@ -241,7 +244,8 @@ class DLModeler(object):
         """
         if mode =='train':
             #Training patch data (ny,nx,#variables) 
-            patch_data = np.zeros( (self.patch_radius,self.patch_radius,len(self.forecast_variables)) ) 
+            patch_data = np.zeros( (len(hours), self.patch_radius,
+                    self.patch_radius,len(self.forecast_variables)) ) 
         else: 
             #Forecast patch data (hours,#patches,ny,nx,#variables) 
             data_shape = h5py.File(files[0],'r')['data'].shape+(len(self.forecast_variables),)
@@ -249,14 +253,16 @@ class DLModeler(object):
         
         for v,variable_file in enumerate(files):
             with h5py.File(variable_file, 'r') as hf:
+                compressed_patch_data = hf['data']
                 if mode =='train':
-                    if data_augment > 0.5:
-                        #Augment data by adding small amounts of variance
-                        var_data = hf['data'][hour,patch,:,:].ravel()
-                        noise = np.nanvar(var_data)*np.random.choice(np.arange(-0.5,0.5,0.15))
-                        patch_data[:,:,v] = (var_data + noise).reshape((self.patch_radius,self.patch_radius))
-                    else: patch_data[:,:,v] = hf['data'][hour,patch,:,:]
-                else: patch_data[:,:,:,:,v] = hf['data'][()]
+                    for i in np.arange(len(hours)):
+                        if data_augment[i] > 0.5:
+                            #Augment data by adding small amounts of variance
+                            var_data = compressed_patch_data[hours[i],patches[i],:,:].ravel()
+                            noise = np.nanvar(var_data)*np.random.choice(np.arange(-0.5,0.5,0.15))
+                            patch_data[i,:,:,v] = (var_data + noise).reshape((self.patch_radius,self.patch_radius))
+                        else: patch_data[i,:,:,v] = compressed_patch_data[hours[i],patches[i],:,:]
+                else: patch_data[:,:,:,:,v] = compressed_patch_data[()]
         return patch_data
     
     def standardize_data(self,member,model_data):

@@ -41,9 +41,6 @@ if __name__ == "__main__":
           packages=["util","processing"],
           scripts=["bin/dndata", "bin/dnforecast", "bin/dnfileoutput"],
             #,"bin/dncalibration" 
-            #"bin/hsfileoutput", "bin/hsplotter", 
-            #    "bin/hswrf3d", "bin/hsstation", "bin/hsncarpatch", "bin/hscalibration","bin/hsdldata",
-            #    "bin/hsdlforecast","bin/hsdlfileoutput"],
           data_files=[("mapfiles", ["mapfiles/hrefv2_2018_map.txt"])],
           keywords=["hail","verification","deep learning","weather", "meteorology"],
           classifiers=classifiers,
