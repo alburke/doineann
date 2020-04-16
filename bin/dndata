@@ -2,6 +2,7 @@
 from processing.DLProcessing import DLPreprocessing
 from util.Config import Config
 from multiprocessing import Pool
+import multiprocessing as mp
 import argparse, pdb
 from netCDF4 import Dataset
 import numpy as np
@@ -18,7 +19,6 @@ def main():
     """
     parser = argparse.ArgumentParser("hsdldata - Hagelslag Deep Learning Data Processor")
     parser.add_argument("config", help="Configuration file")
-    parser.add_argument("-p", "--proc", type=int, default=1,help="Number of processors")
     parser.add_argument("-o", "--obs", action="store_true", help="Process observed tracks only")
     args = parser.parse_args()
     required = ['dates','start_hour','end_hour','ensemble_members','model_path', 
@@ -45,7 +45,7 @@ def main():
     #Process map data
     dlprocess.process_map_data(config.model_map_file)
     #Process obs and ensemble data with parallelization
-    pool = Pool(args.proc)
+    pool = Pool(mp.cpu_count()//5)
     for run_date in config.dates:
         for member in config.ensemble_members:
             member_path = '{0}/{1}'.format(config.hf_path,member)

@@ -125,63 +125,52 @@ class DLModeler(object):
                     end=self.end_dates['train'],freq='1D').strftime(self.run_date_format)
         
         #Place all obs data into respective category
-        all_days_obs_categories = {}
-        #Count the number of categorical examples
-        
-        all_days_obs_categories_count = np.zeros( (len(self.class_percentage.keys())) )
-        print('Selecting random {0} training samples'.format(member))
-        #Loop through each category:
-        for c,category in enumerate(self.class_percentage.keys()):
-            #Loop through each date
-            all_days_obs_data = {}
-            for str_date in string_dates:
-                #If there are model or obs files, continue to next date
-                model_file = glob(self.hf_path + '/{0}/*{1}*'.format(member,str_date))
-                obs_file = glob(self.hf_path + '/*obs*{0}*'.format(str_date))
-                if len(model_file) < 1 or len(obs_file) < 1:continue
-                #Open obs file
-                with h5py.File(obs_file[0], 'r') as hf:
-                    data = hf['data'][()]
-                if data.shape[0] < 1:continue 
-                single_day_obs_data = {}
-                for hour in np.arange(data.shape[0]):
-                    inds = np.where(data[hour] == category)[0]
-                    if len(inds) >1: 
-                        single_day_obs_data[hour] = inds
-                        all_days_obs_categories_count[c] += len(inds)
-                if single_day_obs_data: all_days_obs_data[str_date] = single_day_obs_data
-            if all_days_obs_data:all_days_obs_categories[category]= all_days_obs_data
-        
+        cols = ['Random Date','Random Hour','Random Patch','Obs Label','Data Augmentation'] 
+        obs_categories_examples = pd.DataFrame(columns=cols)
+
+        print('Selecting {0} random {1} training samples'.format(
+        self.num_examples,member))
         try:
-            #Find the number of desired examples per category
-            obs_categories_examples = [] 
-            count = 0
-            for category,percentage in self.class_percentage.items():
-                subset_class_examples = int(self.num_examples*percentage)
-                total_class_examples = all_days_obs_categories[category]
-                if all_days_obs_categories_count[count] < subset_class_examples:data_augment = 1
-                else:data_augment = 0
-                count +=1
-                for e in np.arange(subset_class_examples):
-                    #Choose random dates, hours, and patches for training
-                    random_date = np.random.choice(list(total_class_examples))
-                    random_hour = np.random.choice(list(total_class_examples[random_date]))
-                    random_patch = np.random.choice(list(total_class_examples[random_date][random_hour]))
-                    obs_categories_examples.append([random_date,random_hour,random_patch,category,data_augment])
-            
-            #Output dataframe with the randomly chosen data
-            cols = ['Random Date','Random Hour', 'Random Patch', 'Obs Label','Data Augmentation'] 
-            pandas_df_examples = pd.DataFrame(obs_categories_examples,columns=cols)
-            pandas_df_examples = shuffle(pandas_df_examples)
-            pandas_df_examples.reset_index(inplace=True, drop=True)
-            print(pandas_df_examples)
+            #Loop through each category:
+            for c,category in enumerate(self.class_percentage.keys()):
+                #Loop through each date
+                all_days_obs_data = []
+                for str_date in string_dates:
+                    #If there are model or obs files, continue to next date
+                    model_file = glob(self.hf_path + '/{0}/*{1}*'.format(member,str_date))
+                    obs_file = glob(self.hf_path + '/*obs*{0}*'.format(str_date))
+                    if len(model_file) < 1 or len(obs_file) < 1:continue
+                    #Open obs file
+                    with h5py.File(obs_file[0], 'r') as hf:
+                        data = hf['data'][()]
+                    if data.shape[0] < 1:continue 
+                    for hour in np.arange(data.shape[0]):
+                        inds = np.where(data[hour] == category)[0]
+                        if len(inds) >1:
+                            for i in inds:
+                                all_days_obs_data.append((str_date,hour,i))
+                df_all_days_obs_data = pd.DataFrame(all_days_obs_data,columns=cols[:3])
+                #Find the number of desired examples per category
+                subset_class_examples = int(self.num_examples*self.class_percentage[category])
+                if len(df_all_days_obs_data) < subset_class_examples:
+                    data_augment = 1
+                    randomly_sampled_patches = df_all_days_obs_data.sample(
+                    n=subset_class_examples,replace=True) 
+                else:
+                    data_augment = 0
+                    randomly_sampled_patches = df_all_days_obs_data.sample(
+                    n=subset_class_examples,replace=False) 
+                randomly_sampled_patches['Obs Label'] = category
+                randomly_sampled_patches['Data Augmentation'] = data_augment    
+                obs_categories_examples = obs_categories_examples.append(randomly_sampled_patches,ignore_index=True)
+            print(obs_categories_examples)
             print('Writing out {0}'.format(training_filename))
-            pandas_df_examples.to_csv(training_filename)
-            return pandas_df_examples 
+            obs_categories_examples.to_csv(training_filename)
+            return obs_categories_examples
         except:
             print('No training data found')
             raise
-    
+        
     def read_files(self,mode,member,dates,hour=None,patch=None,data_augment=None): 
         """
         Function to read pre-processed model data for each individual predictor
@@ -196,7 +185,6 @@ class DLModeler(object):
             data_augment (str): Augmentation of random training patch, binary. 
         """
         total_patch_data = []
-
         
         #Start up parallelization
         pool = Pool(mp.cpu_count())
