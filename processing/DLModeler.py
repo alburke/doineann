@@ -339,8 +339,9 @@ class DLModeler(object):
         conv_hist = model.fit(model_data, model_labels, epochs=20, batch_size=batches,validation_split=0.1)
         
         #Save trained model
-        model_file = self.model_path+'/{0}_{1}_{2}_CNN_model.h5'.format(member,
-            self.start_dates['train'].strftime('%Y%m%d'),self.end_dates['train'].strftime('%Y%m%d'))
+        model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model.h5'.format(
+            member,self.start_dates['train'].strftime('%Y%m%d'),
+            self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
         model.save(model_file)
         print('Writing out {0}'.format(model_file))
         del model_labels,model_data
