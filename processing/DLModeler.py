@@ -7,16 +7,18 @@ import pandas as pd
 import numpy as np
 import random
 import h5py
-
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold
 
 #Parallelization packages
 from multiprocessing import Pool
 import multiprocessing as mp
+import matplotlib.pyplot as plt
 
 #Deep learning packages
-#import tensorflow as tf
-#from keras import layers
-#from keras import models
+import tensorflow as tf
+from keras import layers
+from keras import models
 ##from keras.optimizers import Adam
 ##from keras.regularizers import l2
 ##import keras.backend as K
@@ -264,7 +266,7 @@ class DLModeler(object):
         Returns:
             Standardized data
         """
-        
+        print('Standardizing data') 
         scaling_file = self.model_path+'/{0}_{1}_{2}_{3}_training_scaling_values.csv'.format(
             member,self.start_dates['train'].strftime('%Y%m%d'),
             self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
@@ -309,35 +311,49 @@ class DLModeler(object):
         print('Model data shape {0}'.format(np.shape(model_data)))
         print('Label data shape {0}\n'.format(np.shape(model_labels)))
 
+        #model.add(layers.Dropout(0.1))
+        print(model_labels)
         #Initiliaze Convolutional Neural Net (CNN)
         model = models.Sequential()
-        
-        #l2_a= 0.001
-        
         #First layer, input shape (y,x,# variables) 
         model.add(layers.Conv2D(32, (5, 5), activation='relu', 
-            input_shape=(np.shape(model_data[0]))))
-        model.add(layers.Conv2D(32, (5,5),activation='relu'))
+                input_shape=(np.shape(model_data[0]))))
         model.add(layers.AveragePooling2D())
         #Second layer
-        model.add(layers.Conv2D(64, (3, 3),activation='relu'))
+        model.add(layers.Conv2D(64, (5, 5),activation='relu'))
         model.add(layers.AveragePooling2D())
         #Third layer
-        model.add(layers.Conv2D(128, (3,3),activation='relu'))
+        model.add(layers.Conv2D(128, (5,5),activation='relu'))
         model.add(layers.AveragePooling2D())
-    
         #Flatten the last convolutional layer into a long feature vector
         model.add(layers.Flatten())
         model.add(layers.Dense(512, activation='relu'))
         model.add(layers.Dense(4, activation='softmax'))
-
         #Compile neural net
-        #opt = Adam()
-        model.compile(optimizer='adam',loss='categorical_crossentropy',metrics=[tf.keras.metrics.AUC()])
-        batches = int(self.num_examples/20.0)
-        print(batches)
-        conv_hist = model.fit(model_data, model_labels, epochs=20, batch_size=batches,validation_split=0.1)
+        model.compile(optimizer='adam',loss='binary_crossentropy',
+                metrics=[tf.keras.metrics.AUC()])
+        print(model.summary())
+        #Fit neural net
+        x_train,x_valid,y_train,y_valid=train_test_split(model_data,model_labels, 
+            test_size=0.3,shuffle=True)
         
+        n_epochs = 20
+        conv_hist = model.fit(x_train,y_train, 
+                epochs=n_epochs,batch_size=int(self.num_examples/n_epochs),
+                verbose=1,validation_data=(x_valid,y_valid))
+        '''
+        try:
+            plt.plot(conv_hist.epoch, conv_hist.history["val_loss"], label="validation")
+            plt.plot(conv_hist.epoch, conv_hist.history["loss"], label="train")
+            plt.xticks(conv_hist.epoch)
+            plt.legend()
+            plt.ylabel("AUC")
+            plt.xlabel("Epoch")
+            plt.title("Conv Net Training History")
+            plt.show()
+
+        except:print('hi')
+        '''
         #Save trained model
         model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model.h5'.format(
             member,self.start_dates['train'].strftime('%Y%m%d'),

@@ -74,10 +74,9 @@ def train_models(config,dlmodel,member):
     if train_data is not None:
         #Standardize data
         standard_train_data = dlmodel.standardize_data(member,train_data) 
-        '''
         #Train and save models
         dlmodel.train_CNN(member,standard_train_data,train_label)    
-        '''
+        
     return 
 
 
