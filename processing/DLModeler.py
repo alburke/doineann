@@ -311,22 +311,24 @@ class DLModeler(object):
         print('Model data shape {0}'.format(np.shape(model_data)))
         print('Label data shape {0}\n'.format(np.shape(model_labels)))
 
-        #model.add(layers.Dropout(0.1))
-        print(model_labels)
         #Initiliaze Convolutional Neural Net (CNN)
         model = models.Sequential()
         #First layer, input shape (y,x,# variables) 
-        model.add(layers.Conv2D(32, (5, 5), activation='relu', 
-                input_shape=(np.shape(model_data[0]))))
-        model.add(layers.AveragePooling2D())
+        model.add(layers.Conv2D(32, (3,3), activation='relu', 
+                input_shape=(np.shape(model_data[0])),padding='same'))
+        model.add(layers.MaxPooling2D())
         #Second layer
-        model.add(layers.Conv2D(64, (5, 5),activation='relu'))
-        model.add(layers.AveragePooling2D())
+        model.add(layers.Conv2D(64, (3,3),activation='relu',padding='same'))
+        model.add(layers.MaxPooling2D())
         #Third layer
-        model.add(layers.Conv2D(128, (5,5),activation='relu'))
-        model.add(layers.AveragePooling2D())
+        model.add(layers.Conv2D(128, (3,3),activation='relu',padding='same'))
+        model.add(layers.MaxPooling2D())
+        #Fourth layer
+        model.add(layers.Conv2D(128, (3,3),activation='relu',padding='same'))
+        model.add(layers.MaxPooling2D())
         #Flatten the last convolutional layer into a long feature vector
         model.add(layers.Flatten())
+        model.add(layers.Dropout(0.5)) 
         model.add(layers.Dense(512, activation='relu'))
         model.add(layers.Dense(4, activation='softmax'))
         #Compile neural net
@@ -334,26 +336,16 @@ class DLModeler(object):
                 metrics=[tf.keras.metrics.AUC()])
         print(model.summary())
         #Fit neural net
-        x_train,x_valid,y_train,y_valid=train_test_split(model_data,model_labels, 
-            test_size=0.3,shuffle=True)
+        #x_train,x_valid,y_train,y_valid=train_test_split(model_data,model_labels, 
+        #    test_size=0.2,shuffle=True)
         
-        n_epochs = 20
-        conv_hist = model.fit(x_train,y_train, 
-                epochs=n_epochs,batch_size=int(self.num_examples/n_epochs),
-                verbose=1,validation_data=(x_valid,y_valid))
-        '''
-        try:
-            plt.plot(conv_hist.epoch, conv_hist.history["val_loss"], label="validation")
-            plt.plot(conv_hist.epoch, conv_hist.history["loss"], label="train")
-            plt.xticks(conv_hist.epoch)
-            plt.legend()
-            plt.ylabel("AUC")
-            plt.xlabel("Epoch")
-            plt.title("Conv Net Training History")
-            plt.show()
-
-        except:print('hi')
-        '''
+        n_epochs = 15
+        conv_hist = model.fit(model_data,model_labels,
+                #x_train,y_train, 
+                epochs=n_epochs,batch_size=1024, #int(self.num_examples/n_epochs),
+                verbose=1)#,validation_data=(x_valid,y_valid))
+        
+        
         #Save trained model
         model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model.h5'.format(
             member,self.start_dates['train'].strftime('%Y%m%d'),
