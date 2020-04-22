@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 from processing.DLModeler import DLModeler
 from util.Config import Config
-from keras import models
+from tensorflow.keras import models
 import argparse, pdb
 import pandas as pd
 import numpy as np
@@ -49,8 +49,7 @@ def main():
     dlmodel = DLModeler(config.model_path,config.hf_path,
         config.start_dates,config.end_dates,config.num_examples,
         config.class_percentages,config.patch_radius,
-        config.run_date_format,np.array(short_variable_names)) #config.forecast_variables)
-    
+        config.run_date_format,np.array(short_variable_names)) 
     for member in config.ensemble_members:
         if args.train:
             train_models(config,dlmodel,member)
@@ -74,10 +73,8 @@ def train_models(config,dlmodel,member):
     if train_data is not None:
         #Standardize data
         standard_train_data = dlmodel.standardize_data(member,train_data) 
-        '''
         #Train and save models
         dlmodel.train_CNN(member,standard_train_data,train_label)    
-        '''
     return 
 
 
@@ -93,13 +90,14 @@ def predict_models(config,dlmodel,member):
  
     """
     #Open CNN model 
-    cnn_model_file = config.model_path+'/{0}_{1}_{2}_CNN_model.h5'.format(member,
-        config.start_dates['train'].strftime('%Y%m%d'),config.end_dates['train'].strftime('%Y%m%d'))
+    cnn_model_file = config.model_path+'/{0}_{1}_{2}_{3}_CNN_model.h5'.format(
+            member,config.start_dates['train'].strftime('%Y%m%d'),
+            config.end_dates['train'].strftime('%Y%m%d'),config.num_examples)
     #Load saved CNN model
     cnn_model = models.load_model(cnn_model_file) 
     #Read data on forecast days
     forecast_dates = pd.date_range(start=config.start_dates['forecast'],
-        end=config.end_dates['forecast'],freq='1D').strftime(self.run_date_format)
+        end=config.end_dates['forecast'],freq='1D').strftime(config.run_date_format)
     for date in forecast_dates:
         print('\nPredicting {0} data\n'.format(date))
         #Extract forecast data (#hours, #patches, nx, ny, #variables)
@@ -116,17 +114,15 @@ def predict_models(config,dlmodel,member):
             patch_predictions[0,hour,:] = cnn_preds[:,2]+cnn_preds[:,3]
             #Predict sig-severe hail > 50 mm
             patch_predictions[1,hour,:] = cnn_preds[:,3]
-
         #Output gridded forecasts
         gridded_out_file = config.forecast_grid_path+'{0}_{1}_forecast_grid.h5'.format(member,date)
         gridded_data = dlmodel.gridded_forecasts(patch_predictions,config.map_file)    
-        
         print('Writing out {0}'.format(gridded_out_file))
         with h5py.File(gridded_out_file, 'w') as hf:
             hf.create_dataset("data",data=gridded_data,
             compression='gzip',compression_opts=6)
     return
-
+    
 if __name__ == "__main__":
     __spec__ = None
     main()
