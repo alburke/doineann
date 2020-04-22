@@ -1,4 +1,4 @@
-#!/home/tmp/aburke/miniconda3/envs/deephail/bin/python
+#!/usr/bin/env python
 from processing.DLProcessing import DLPreprocessing
 from util.Config import Config
 from multiprocessing import Pool

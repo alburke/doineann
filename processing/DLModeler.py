@@ -212,7 +212,6 @@ class DLModeler(object):
         elif mode=='train':
             total_unique_patch_data  = [data for pool_file in total_patch_data for data in pool_file.get()]
             return np.array(total_unique_patch_data)
-        #[patch_data[unique_date].get() for patch_data in total_patch_data for unique_date in np.arange(len(patch_data.get()))])
         else: 
             if len(total_patch_data) >= 1:
                 return np.array(total_patch_data)[0]
