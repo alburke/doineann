@@ -60,7 +60,7 @@ class GridOutput(object):
                 filenames.append(files[0])
         return filenames
     
-    def load_model_data(self,model_variable,model_path,data=None):
+    def load_model_data(self,model_variable,model_path):
         """
         Loads data from grib2 file objects or list of grib2 file objects. 
         Handles specific grib2 variable names and grib2 message numbers.
@@ -68,8 +68,8 @@ class GridOutput(object):
         Returns:
             Array of data loaded from files in (time, y, x) dimensions, Units
         """
+        data=None
         filenames = self.find_data_files(model_path)
-        
         #Open each file for reading.
         file_objects = [f for f in filenames if exists(f)]
         if len(file_objects) <1: 
@@ -85,6 +85,7 @@ class GridOutput(object):
                     units = self.unknown_units[Id] 
                 else:
                     units = grib[model_variable].units
+                grib.close()
             elif type(model_variable) is str:
                 if '_' in model_variable:
                     variable = model_variable.split('_')[0]
@@ -93,26 +94,31 @@ class GridOutput(object):
                         Id, units = self.format_grib_name(variable)
                         grib = pygrib.index(g_file,'parameterNumber','level' )
                         data_values = grib.select(parameterNumber=Id, level=int(level))[0].values
+                        grib.close()
                     else:
                         grib = pygrib.index(g_file,'name','level')
                         data_values = grib.select(name=variable, level=int(level))[0].values
+                        grib.close()
                 else:   
                     if model_variable in self.unknown_names.values():
                         Id, units = self.format_grib_name(model_variable)
                         grib = pygrib.index(g_file,'parameterNumber')
                         data_values = grib.select(parameterNumber=Id)[0].values
+                        grib.close()
                     else:
                         grib = pygrib.index(g_file,'name')
                         if len(grib.select(name=model_variable)) > 1:
                             raise NameError("Multiple '{0}' records found. Rename with level:'{0}_level'".format(model_variable))
                         else:
                             data_values = grib.select(name=model_variable)[0].values
+                            units = grib.select(name=model_variable)[0].units
+                        grib.close()
             if data is None:
-                data = np.empty((len(self.valid_dates), data_values.shape[0], data_values.shape[1]), dtype=float)
+                data = np.empty((len(self.valid_dates), data_values.shape[0], data_values.shape[1]), dtype=float)*np.nan
                 data[f]=data_values[:]
             else:
                 data[f]=data_values[:]
-            grib.close()
+            del data_values
         return data
         
     def format_grib_name(self,selected_variable):
