@@ -37,7 +37,7 @@ def main():
     
     #Parse arguments and define fixed values
     args = parser.parse_args()
-    if args.calibration:
+    if args.calibration is True:
         smoothing = 0 #number of gridpoints 
         file_label = 'unsmoothed'
     else: 
@@ -71,21 +71,21 @@ def main():
                 if not os.path.exists(date_outpath): os.makedirs(date_outpath)
                 print("Daily probabilitiy grib files")
                 write_grib2_file(forecast_grid[s,:,:,:],0,24,args.map_file,date,
-                    date_outpath,"{0}_mm_{1}".format(size_forecast,file_label),args.ens,smoothing) 
+                    date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),args.ens,smoothing) 
             if args.netcdf_out: 
                 date_outpath = outpath+'netcdf/'
                 if not os.path.exists(date_outpath): os.makedirs(date_outpath)
                 print("Daily probabilitiy nc files")
                 write_netcdf_file(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
                     mapping_data['lat'],
-                    date_outpath,"{0}_mm_{1}".format(size_forecast,file_label),args.ens,smoothing) 
+                    date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),args.ens,smoothing) 
             if args.plot_out: 
                 date_outpath = outpath+'png/'
                 if not os.path.exists(date_outpath): os.makedirs(date_outpath)
                 print("Daily probabilitiy plots")
                 plot_period_prob(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
                     mapping_data['lat'],
-                    date_outpath,"{0}_mm_{1}".format(size_forecast,file_label),args.ens,smoothing) 
+                    date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),args.ens,smoothing) 
                 
                 
             print()
@@ -96,14 +96,14 @@ def main():
                         print("Hourly probability plots")
                         plot_period_prob(forecast_grid[s,:,:,:],hour,(hour+4),
                             date,mapping_data['lon'],mapping_data['lat'],
-                            date_outpath,"{0}_mm_{1}".format(size_forecast,file_label),
+                            date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),
                             args.ens,smoothing) 
                     print()
                     if args.grib_out: 
                         date_outpath = outpath+'grib/'
                         print("Hourly probabilitiy grib files")
                         write_grib2_file(forecast_grid[s,:,:,:],hour,(hour+4),args.map_file,date,
-                            date_outpath,"{0}_mm_{1}".format(size_forecast,file_label),
+                            date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),
                             args.ens,smoothing) 
                     print()
                     if args.netcdf_out: 
@@ -111,7 +111,7 @@ def main():
                         print("Daily probabilitiy nc files")
                         write_netcdf_file(forecast_grid[s,:,:,:],hour,(hour+4),date,
                             mapping_data['lon'],mapping_data['lat'],
-                            date_outpath,"{0}_mm_{1}".format(size_forecast,file_label),
+                            date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),
                             args.ens,smoothing) 
                  
     return
@@ -123,8 +123,8 @@ def load_dl_data(forecast_date,members,data_path):
         print(filename)
         with h5py.File(filename,'r') as hf:
             member_data.append(hf['data'][()])
-    print('Maximum value',np.nanmax(member_data))
     average_ens_data = np.nanmean(member_data,axis=0)
+    print('Maximum value',np.nanmax(average_ens_data))
     return np.array(average_ens_data)
 
 def plot_period_prob(forecast_grid,start_time,end_time,date,
@@ -176,7 +176,7 @@ def plot_period_prob(forecast_grid,start_time,end_time,date,
             ((start_time+12)%24),((end_time+12)%24)),
             fontweight="bold",
             fontsize=12)
-    filename = out_path + "{0}_Hail_{1}_{2}_Hours_{3}-{4}.png".format(
+    filename = out_path + "{0}_Hail_DL_{1}_{2}_Hours_{3}-{4}.png".format(
                                                         ensemble_name,
                                                         plot_mode,
                                                         date.strftime("%y%m%d"),
@@ -184,6 +184,7 @@ def plot_period_prob(forecast_grid,start_time,end_time,date,
     
     print("Writing to " + filename)
     plt.savefig(filename,bbox_inches="tight", dpi=300)
+    plt.show()
     plt.close()
     
     return
@@ -233,7 +234,7 @@ def write_grib2_file(forecast_grid,start_time,end_time,map_file,
     pdtmp1[-2] = 0
     grib_objects.addfield(1, pdtmp1, 0, drtmp1, data)
     grib_objects.end()
-    filename = out_path + "{0}_Hail_{1}_{2}_Hours_{3}-{4}.grib2".format(
+    filename = out_path + "{0}_Hail_DL_{1}_{2}_Hours_{3}-{4}.grib2".format(
                                                         ensemble_name,
                                                         plot_mode,
                                                         run_date.strftime("%y%m%d"),
@@ -261,13 +262,12 @@ def write_netcdf_file(forecast_grid,start_time,end_time,date,
         plot_mode (str): Type of plot, either ensemble max or probability
         map_file (str): Map associated with the input/output grib files
     """
-
     #Find ensemble probabilities
     neigh_prob = forecast_grid[start_time:end_time,:,:].max(axis=0)
     if smoothing > 0: neigh_prob = gaussian_filter(forecast_grid[start_time:end_time,:,:].max(axis=0),
         smoothing,mode='constant')
     
-    filename = out_path + "{0}_Hail_{1}_{2}_Hours_{3}-{4}.nc".format(
+    filename = out_path + "{0}_Hail_DL_{1}_{2}_Hours_{3}-{4}.nc".format(
                                                         ensemble_name,
                                                         plot_mode,
                                                         date.strftime("%y%m%d"),

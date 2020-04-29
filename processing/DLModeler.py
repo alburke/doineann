@@ -6,6 +6,7 @@ from glob import glob
 import pandas as pd
 import numpy as np
 import random
+random.seed(42)
 import h5py
 
 #Parallelization packages
@@ -13,10 +14,8 @@ from multiprocessing import Pool
 import multiprocessing as mp
         
 #Deep learning packages
-from tensorflow.keras import models
 import tensorflow as tf
-from tensorflow.keras import layers
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras import layers,regularizers,models
 
 class DLModeler(object):
     def __init__(self,model_path,hf_path,start_dates,end_dates,
@@ -81,24 +80,34 @@ class DLModeler(object):
                 #Selecting random patches for training
                 patches = self.training_data_selection(member,training_filename)
             
+            #Extracting obs labels
+            member_obs_label = patches['Obs Label'].values.astype('int64')
+            with h5py.File(obs_training_labels_filename, 'w') as hf:
+                hf.create_dataset("data",data=member_obs_label)
+            print('Writing out {0}'.format(obs_training_labels_filename))
+            
             #Extracting model patch data
             member_model_data = self.read_files(mode,member,patches['Random Date'], 
                 patches['Random Hour'],patches['Random Patch'],patches['Data Augmentation'])
+            
             if member_model_data is None: print('No training data found')
             else:
+                #Augment data by adding small amounts of variance
+                augment_inds = np.where(patches['Data Augmentation'] >0.5)[0]
+                if len(augment_inds) >= 1:
+                    print('Augmenting data')
+                    print(len(augment_inds))
+                    for var in np.arange(len(self.forecast_variables)):
+                        total_var = np.nanvar(member_model_data[augment_inds,:,:,var])
+                        for example in np.arange(len(augment_inds)):
+                            member_model_data[example,:,:,var] =\
+                            member_model_data[example,:,:,var]+total_var*np.random.choice(np.arange(-0.3,0.31,0.01))
                 #Standardize data
                 standard_member_model_data = self.standardize_data(member,member_model_data,mode='train') 
                 with h5py.File(model_training_data_filename, 'w') as hf:
                     hf.create_dataset("data",data=standard_member_model_data)
                 print('Writing out {0}'.format(model_training_data_filename)) 
-        
-            member_obs_label = patches['Obs Label'].values
-            #Extracting obs labels
-            with h5py.File(obs_training_labels_filename, 'w') as hf:
-                hf.create_dataset("data",data=member_obs_label)
-                print('Writing out {0}'.format(obs_training_labels_filename))
-            #onehot_encoder = OneHotEncoder(sparse=False,categories='auto')
-            #member_obs_label = onehot_encoder.fit_transform(patches['Obs Label'].values.reshape(-1, 1))
+           
         return standard_member_model_data, member_obs_label
 
     def preprocess_validation_data(self,member):
@@ -123,50 +132,60 @@ class DLModeler(object):
         
         if exists(obs_validation_labels_filename) and exists(model_validation_data_filename): 
             #Opening validation files
-            print('Opening {0}'.format(obs_validation_labels_filename))
-            with h5py.File(obs_validation_labels_filename, 'r') as ohf:
-                validation_obs_data = ohf['data'][()]
-            
             print('Opening {0}'.format(model_validation_data_filename))
             with h5py.File(model_validation_data_filename, 'r') as mhf:
-                validation_standard_member_model_data = mhf['data'][()]
+                standard_validation_data = mhf['data'][()]
+            
+            print('Opening {0}'.format(obs_validation_labels_filename))
+            with h5py.File(obs_validation_labels_filename, 'r') as ohf:
+                reshaped_validation_obs = ohf['data'][()]
+            
         else:
             total_validation_dates = pd.date_range(start=self.start_dates['valid'],
                     end=self.end_dates['valid'],freq='1D').strftime('%Y%m%d').values
-            random.seed(42)
             random.shuffle(total_validation_dates)
-            validation_data = [] 
-            validation_obs_data = []
-            added_validation_dates = []
+            total_validation_obs = []
+            total_validation_data = []
             count=0
             print()
             for v_date in total_validation_dates:
                 if count == 10: break
                 obs_file = glob(self.hf_path + '/obs/*obs*{0}*'.format(v_date))
+                model_file = glob(self.hf_path + '/{0}/*{1}*'.format(member,v_date))
                 if len(obs_file) < 1: continue 
+                if len(model_file) < len(self.forecast_variables):continue
                 #Open obs file
                 with h5py.File(obs_file[0], 'r') as hf:
                     obs = hf['data'][()]
                 if np.nanmax(obs) < 3: continue
                 print('Adding {0} to validation set'.format(v_date))
-                validation_obs_data.append(obs)
-                added_validation_dates.append(v_date)
+                sig_hours,sig_patches = np.where(obs >= 3)
+                validation_data = self.read_files('forecast',member,v_date)
+                if len(np.unique(sig_hours)) > 1: 
+                    for hour in np.unique(sig_hours): 
+                        total_validation_data.append(validation_data[hour])
+                        total_validation_obs.append(obs[hour])
+                else:
+                    total_validation_data.append(validation_data[np.unique(sig_hours)][0])
+                    total_validation_obs.append(obs[np.unique(sig_hours)[0]])
                 count +=1
-            
-            validation_data = self.read_files('forecast',member,added_validation_dates)
-            validation_member_data = np.array(validation_data).reshape(-1,
-                *np.array(validation_data).shape[-3:])
-            
-            validation_standard_member_model_data = self.standardize_data(member,validation_member_data)
-            with h5py.File(model_validation_data_filename, 'w') as hf:
-                hf.create_dataset("data",data=validation_standard_member_model_data)
-                print('Writing out {0}'.format(model_validation_data_filename)) 
-            
+            reshaped_validation_data = np.array(total_validation_data).reshape(-1,
+                *np.shape(total_validation_data)[-3:])
+            reshaped_validation_obs = np.array(total_validation_obs).ravel()
+            print(np.count_nonzero(reshaped_validation_obs))
+            #Standardize validation data 
+            standard_validation_data = self.standardize_data(member,reshaped_validation_data)
+            #Output data
             with h5py.File(obs_validation_labels_filename, 'w') as hf:
-                hf.create_dataset("data",data=np.array(validation_obs_data).ravel())
-                print('Writing out {0}'.format(obs_validation_labels_filename))
+                hf.create_dataset("data",data=reshaped_validation_obs) 
+            print('Writing out {0}'.format(obs_validation_labels_filename))
             
-        return validation_standard_member_model_data,np.array(validation_obs_data).ravel()
+            with h5py.File(model_validation_data_filename, 'w') as hf:
+                hf.create_dataset("data",data=standard_validation_data)
+            print('Writing out {0}'.format(model_validation_data_filename)) 
+            
+            print(np.shape(standard_validation_data),np.shape(reshaped_validation_obs)) 
+        return standard_validation_data,reshaped_validation_obs
 
 
     def training_data_selection(self,member,training_filename):
@@ -217,17 +236,20 @@ class DLModeler(object):
                 subset_class_examples = int(self.num_examples*self.class_percentage[category])
                 print(subset_class_examples)
                 if len(df_all_days_obs_data) < subset_class_examples:
-                    data_augment = 1
-                    randomly_sampled_patches = df_all_days_obs_data.sample(
-                    n=subset_class_examples,replace=True) 
+                    n_aug = subset_class_examples-len(df_all_days_obs_data)
+                    randomly_sampled_patches_augment = df_all_days_obs_data.sample(
+                            n=n_aug,replace=True)
+                    df_all_days_obs_data['Data Augmentation'] = 0
+                    randomly_sampled_patches_augment['Data Augmentation'] = 1
+                    randomly_sampled_patches = pd.concat([randomly_sampled_patches_augment, 
+                        df_all_days_obs_data], ignore_index=True) 
                 else:
-                    data_augment = 0
                     randomly_sampled_patches = df_all_days_obs_data.sample(
-                    n=subset_class_examples,replace=False) 
+                        n=subset_class_examples,replace=False) 
+                    randomly_sampled_patches['Data Augmentation'] = 0    
                 randomly_sampled_patches['Obs Label'] = category
-                randomly_sampled_patches['Data Augmentation'] = data_augment    
-                obs_categories_examples = obs_categories_examples.append(randomly_sampled_patches,ignore_index=True)
-            obs_categories_examples = obs_categories_examples.sort_values(by='Random Date')
+                obs_categories_examples = obs_categories_examples.append(randomly_sampled_patches,ignore_index=True,sort=True)
+            obs_categories_examples = obs_categories_examples.sample(frac=1, axis=1).sample(frac=1).reset_index(drop=True)  
             print(obs_categories_examples)
             print('Writing out {0}'.format(training_filename))
             obs_categories_examples.to_csv(training_filename)
@@ -282,17 +304,7 @@ class DLModeler(object):
             return np.array(total_unique_patch_data)
         else:
             return None
-        '''
-        elif mode=='train':
-            total_unique_patch_data  = [data for pool_file in total_patch_data for data in pool_file.get()]
-            return np.array(total_unique_patch_data)
-        else: 
-            if len(total_patch_data) >= 1:
-                total_unique_patch_data  = [data for pool_file in total_patch_data for data in pool_file.get()]
-                return np.array(total_unique_patch_data)
-            else:
-                return None
-        '''
+    
     def extract_data(self,mode,files,hours=None,patches=None,data_augment=None):
         """
         Function to extract training and forecast patch data
@@ -320,12 +332,7 @@ class DLModeler(object):
                 compressed_patch_data = hf['data']
                 if mode =='train':
                     for i in np.arange(len(hours)):
-                        if data_augment[i] > 0.5:
-                            #Augment data by adding small amounts of variance
-                            var_data = compressed_patch_data[hours[i],patches[i],:,:].ravel()
-                            noise = np.nanvar(var_data)*np.random.choice(np.arange(-0.1,0.11,0.01))
-                            patch_data[i,:,:,v] = (var_data + noise).reshape((self.patch_radius,self.patch_radius))
-                        else: patch_data[i,:,:,v] = compressed_patch_data[hours[i],patches[i],:,:]
+                        patch_data[i,:,:,v] = compressed_patch_data[hours[i],patches[i],:,:]
                 else: patch_data[:,:,:,:,v] = compressed_patch_data[()]
         return patch_data
     
@@ -351,17 +358,16 @@ class DLModeler(object):
         
         else:
             scaling_values = pd.DataFrame(np.zeros((len(self.forecast_variables), 2), 
-                dtype=np.float32),columns=['first','ninety-ninth'])
+                dtype=np.float32),columns=['mean','std'])
         
         #Standardize data
         standard_model_data = np.empty( np.shape(model_data) )*np.nan
         for n in np.arange(model_data.shape[-1]):
             if not exists(scaling_file):
-                scaling_values.loc[n, ['first','ninety-ninth']] = [np.nanpercentile(model_data[:,:,:,n],1),
-                    np.nanpercentile(model_data[:,:,:,n],99)]
-            standard_range = (scaling_values.loc[n,'ninety-ninth']-scaling_values.loc[n,'first'])
-            standard_model_data[:,:,:,n] = (model_data[:,:,:,n]-scaling_values.loc[n,'first'])/standard_range
+                scaling_values.loc[n, ['mean','std']] = [np.nanmean(model_data[:,:,:,n]),np.nanstd(model_data[:,:,:,n])]
+            standard_model_data[:,:,:,n] = (model_data[:,:,:,n]-scaling_values.loc[n,'mean'])/(scaling_values.loc[n,'std'])
             
+        print(scaling_values)
         if not exists(scaling_file):
             #Output training scaling values
             print('Writing out {0}'.format(scaling_file))
@@ -385,39 +391,46 @@ class DLModeler(object):
         print('Training label data shape {0}\n'.format(np.shape(model_labels)))
         print('Validation data shape {0}'.format(np.shape(valid_data)))
         print('Validation label data shape {0}\n'.format(np.shape(valid_labels)))
-
+        #Create regularization object
+        regularizer_object = regularizers.l1_l2(l1=0, l2=0.001)
         #Initiliaze Convolutional Neural Net (CNN)
         model = models.Sequential()
         #First layer, input shape (y,x,# variables) 
-        model.add(layers.Conv2D(32, (5,5), activation='relu', 
+        model.add(layers.Conv2D(40, (3,3), activation='relu', 
+                kernel_regularizer=regularizer_object,
                 input_shape=(np.shape(model_data[0]))
                 ))
-        model.add(layers.AveragePooling2D())
-        #model.add(layers.Dropout(0.3))
+        model.add(layers.Dropout(0.25))
+        model.add(layers.BatchNormalization())
+        model.add(layers.MaxPooling2D())
+        
         #Second layer
-        model.add(layers.Conv2D(64, (3,3),activation='relu'))
-        model.add(layers.AveragePooling2D())
-        #model.add(layers.Dropout(0.3))
+        model.add(layers.Conv2D(80, (3,3),kernel_regularizer=regularizer_object,activation='relu'))
+        model.add(layers.Dropout(0.25))
+        model.add(layers.BatchNormalization())
+        model.add(layers.MaxPooling2D())
+        
         #Third layer
-        model.add(layers.Conv2D(128, (3,3),activation='relu'))
-        model.add(layers.AveragePooling2D())
-        #model.add(layers.Dropout(0.3))
+        model.add(layers.Conv2D(160, (3,3),kernel_regularizer=regularizer_object,activation='relu'))
+        model.add(layers.Dropout(0.25))
+        model.add(layers.BatchNormalization())
+        model.add(layers.MaxPooling2D())
+        
         #Flatten the last convolutional layer into a long feature vector
         model.add(layers.Flatten())
-        model.add(layers.Dense(256, activation='relu'))
-        model.add(layers.Dense(2, activation='softmax'))
+        model.add(layers.Dense(512,kernel_regularizer=regularizer_object, activation='relu'))
+        model.add(layers.Dropout(0.5))
+        model.add(layers.BatchNormalization())
+        model.add(layers.Dense(4, kernel_regularizer=regularizer_object, activation='softmax'))
         #Compile neural net
         model.compile(optimizer='adam',loss='categorical_crossentropy',
                 metrics=[tf.keras.metrics.AUC()])
         print(model.summary())
         #Fit neural net
-        #X_train, X_test, y_train, y_test = train_test_split(model_data,model_labels,
-        #    test_size=0.2,shuffle=True)
-        
-        #es = EarlyStopping(monitor='val_loss',mode='min',verbose=1,patience=20)
         n_epochs = 80
         conv_hist = model.fit(model_data,model_labels,
-                epochs=n_epochs,batch_size=1000,verbose=1)
+                epochs=n_epochs,batch_size=1000,verbose=1,
+                class_weight=self.class_percentage)
         #Save trained model
         model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model.h5'.format(
             member,self.start_dates['train'].strftime('%Y%m%d'),
@@ -429,14 +442,35 @@ class DLModeler(object):
         #Find the threshold with the highest AUC score 
         #on validation data
         
-        preds = model.predict(valid_data)[:,0]
+        cnn_preds = model.predict(valid_data)
+        del valid_data
+        no_hail = cnn_preds[:,0]
+        no_sev_hail = cnn_preds[:,1]
+        sev_hail = cnn_preds[:,2]
+        sig_hail = cnn_preds[:,3]
+
+        sev_prob_preds = np.where( (no_hail+no_sev_hail) < (sev_hail+sig_hail), 1, 0)
+
+        df_best_score = pd.DataFrame( np.zeros((1,1)),cols='size_threshold') 
         m = tf.keras.metrics.AUC(num_thresholds=50)
-        prob_threshold_score = np.empty_like(valid_labels)*np.nan
-        for p,prob_thresh in enumerate(np.arange(0.02,1.01,0.02)):
-            threshold_preds = np.where(preds > prob_thresh,1,0)
-            m.update_state(valid_labels,threshold_preds)
-            prob_threshold_score[p] = m.result().numpy())  
-        del valid_labels,valid_data
+        
+        prob_threshold_score = []
+        thresholds = np.arange(0.05,0.96,0.05)
+        true_preds = np.where(valid_labels >= 2, 1, 0)
+        del valid_labels
+        for prob_thresh in thresholds:
+            threshold_preds = np.where(sev_prob_preds >= prob_thresh,1,0)
+            m.update_state(true_preds,threshold_preds)
+            prob_threshold_score.append(m.result().numpy() )
+
+        def_best_score.loc[0,'size_threshold'] = thresholds[np.argmax(prob_threshold_score)]
+        print(def_best_score)
+
+        threshold_model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model_threshold.h5'.format(
+            member,self.start_dates['train'].strftime('%Y%m%d'),
+            self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
+        print('Writing out {0}'.format(threshold_model_file))
+        def_best_score.to_csv(threshold_model_file)
         
         return 
     
@@ -454,7 +488,6 @@ class DLModeler(object):
         #Open mapfile over total domain
         proj_dict, grid_dict = read_ncar_map_file(map_file)
         mapping_data = make_proj_grids(proj_dict, grid_dict)
-        #center_grid_point = int(np.ceil(self.patch_radius/2.0))
         
         #Create cKDtree to convert patch grid points to the total domain
         tree = cKDTree(np.c_[mapping_data['lon'].ravel(),mapping_data['lat'].ravel()])
@@ -467,30 +500,22 @@ class DLModeler(object):
         _,inds = tree.query(np.c_[subset_data[0].ravel(),
                         subset_data[1].ravel()])
         #Fill in total grid with predicted probabilities
-        gridded_predictions = np.zeros( (forecasts.shape[0],forecasts.shape[1],) +\
+        gridded_predictions = np.zeros((forecasts.shape[0],forecasts.shape[1],) +\
             mapping_data['lat'].ravel().shape )
         #Patch size to fill probability predictions
         subset_data_shape = np.array(subset_data.shape)[-2:]
         #Grid to project subset data onto
         total_grid = np.zeros_like( mapping_data['lat'].ravel() )
-        for size_pred in np.arange(forecasts.shape[0]):
-            for hour in np.arange(forecasts.shape[1]):
+        
+        #Output subset data onto full grid using indices from cKDtree
+        for hail_size in np.arange(np.shape(forecasts)[0]):
+            hail_size_pred = forecasts[hail_size]
+            for hour in np.arange(hail_size_pred.shape[0]):
                 prob_on_patches = []
-                for patch in np.arange(forecasts.shape[2]):
-                    patch_data = forecasts[size_pred,hour,patch]
-                    if patch_data < 0.5: patch_data = 0.0
-                    '''
-                    if size_pred == 0:
-                        if patch_data > 0.45: patch_data=1.0
-                        else:patch_data=0.0
-                    if size_pred == 1:
-                        if patch_data > 0.30: patch_data=1.0
-                        else:patch_data=0.0
-                    '''
-                    prob_on_patches.append(np.full(subset_data_shape, patch_data))
-                #Output subset data onto full grid using indices from cKDtree
+                for patch in np.arange(hail_size_pred.shape[1]):
+                    prob_on_patches.append(np.full(subset_data_shape, hail_size_pred[hour,patch]))
                 total_grid[inds] = np.array(prob_on_patches).ravel()
-                gridded_predictions[size_pred,hour,:] = total_grid
+                gridded_predictions[hail_size,hour] = total_grid
         final_grid_shape = (forecasts.shape[0],forecasts.shape[1],)+mapping_data['lat'].shape
         return gridded_predictions.reshape(final_grid_shape)
         

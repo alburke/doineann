@@ -84,26 +84,8 @@ def train_models(config,dlmodel,member):
     onehot_encoder = OneHotEncoder(sparse=False,categories='auto')
     if train_data is not None and valid_data is not None:
         #Train and save models predicting severe hail or no hail
-        hail_no_hail_label = np.where(train_label >= 2,1,0) 
-        train_obs_label = onehot_encoder.fit_transform(hail_no_hail_label.reshape(-1, 1))
-        valid_obs_label = np.where(valid_label >= 2,1,0)
-        #dlmodel.train_CNN(member,train_data,train_obs_label,valid_data,valid_obs_label)
-
-        #Train and save models predicting severe hail or sig severe hail
-        severe_hail_train_label = np.where(train_label >= 2)[0] 
-        sig_or_severe_label = np.where(train_label[severe_hail_train_label] > 2, 1, 0)
-        sig_or_severe_train_label = onehot_encoder.fit_transform(sig_or_severe_label.reshape(-1, 1))
-        
-        severe_hail_valid_label = np.where(valid_label >= 2)[0] 
-        sig_or_severe_valid_label = np.where(valid_label[severe_hail_valid_label] > 2, 1, 0)
-        
-        print('Training severe v sig',np.shape(train_data[severe_hail_train_label]),np.shape(sig_or_severe_train_label))
-        print('Validation severe v sig',np.shape(sig_or_severe_valid_label),np.shape(valid_data[severe_hail_valid_label]))
-
-        #dlmodel.train_CNN(member,
-        #train_data[severe_hail_train_label],sig_or_severe_train_label,
-        #valid_data[severe_hail_valid_label],sig_or_severe_valid_label)
-
+        train_obs_label = onehot_encoder.fit_transform(train_label.reshape(-1, 1))
+        dlmodel.train_CNN(member,train_data,train_obs_label,valid_data,valid_label)
     return 
 
 
@@ -135,14 +117,31 @@ def predict_models(config,dlmodel,member,date):
     
     patch_predictions = np.empty( (2,forecast_data.shape[0],forecast_data.shape[1]) )*np.nan
     #Produce hail forecast using standardized forecast data every hour
-    for hour in np.arange(forecast_data.shape[0]):
-        standard_forecast_data = dlmodel.standardize_data(member,forecast_data[hour])
-        cnn_preds = cnn_model.predict(standard_forecast_data)
-        #Predict severe hail > 25 mm
-        patch_predictions[0,hour,:] = cnn_preds[:,2]+cnn_preds[:,3]
-        print(np.nanmax(patch_predictions[0,hour,:]))
-        #Predict sig-severe hail > 50 mm
-        patch_predictions[1,hour,:] = cnn_preds[:,3]
+    reshaped_forecast_data = forecast_data.reshape(-1,*forecast_data.shape[-3:])
+    standard_forecast_data = dlmodel.standardize_data(member,reshaped_forecast_data) 
+    print(np.shape(standard_forecast_data))
+    #Predict probability of severe hail
+    cnn_preds = cnn_model.predict(standard_forecast_data)
+    
+    #Use minimum prob threshold chosen with validation data
+    threshold_model_file = config.model_path+'/{0}_{1}_{2}_{3}_CNN_model_threshold.h5'.format(
+            member,config.start_dates['train'].strftime('%Y%m%d'),
+            config.end_dates['train'].strftime('%Y%m%d'),config.num_examples)
+    
+    if not os.path.exists(prob_model_file):
+        print('No thresholds found')
+        return 
+    prob_thresholds = pd.read_csv(threshold_model_file)
+    threshold_sev_probs = np.where( (cnn_preds[:,2]+cnn_preds[:,3]) >= prob_thresholds.loc[0,'size_threshold'], 1, 0)
+    threshold_sig_probs = np.where(
+                ((cnn_preds[:,2]+cnn_preds[:,3]) >= prob_thresholds.loc[0,'size_threshold']) &
+                (cnn_preds[:,3] > cnn_preds[:,2]), 1,0)
+    
+    print('No. severe probs',np.count_nonzero(threshold_sev_probs))
+    print('No. sig severe probs',np.count_nonzero(threshold_sig_probs))
+    
+    patch_predictions = np.array([threshold_sev_probs.reshape(forecast_data.shape[0],forecast_data.shape[1]),
+        threshold_sig_probs.reshape(forecast_data.shape[0],forecast_data.shape[1])])
     return patch_predictions
 
 def gridded_output(config,dlmodel,member,date,patch_data):
