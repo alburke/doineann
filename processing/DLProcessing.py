@@ -121,7 +121,6 @@ class DLPreprocessing(object):
                 else:masked_gridded_variable = gridded_variable_data[var_hour]
                 patches = self.slice_into_patches(masked_gridded_variable,self.patch_radius,self.patch_radius)
                 hourly_var_patches.append(patches)
-            
             #Shorten variable names
             if " " in variable: 
                 variable_name= ''.join([v[0].upper() for v in variable.split()]) + variable.split('_')[-1]

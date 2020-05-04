@@ -1,5 +1,4 @@
 from util.make_proj_grids import make_proj_grids, read_ncar_map_file
-from scipy.spatial import cKDTree
 from sklearn.utils import shuffle
 from os.path import exists
 from glob import glob
@@ -366,8 +365,6 @@ class DLModeler(object):
             if not exists(scaling_file):
                 scaling_values.loc[n, ['mean','std']] = [np.nanmean(model_data[:,:,:,n]),np.nanstd(model_data[:,:,:,n])]
             standard_model_data[:,:,:,n] = (model_data[:,:,:,n]-scaling_values.loc[n,'mean'])/(scaling_values.loc[n,'std'])
-            
-        print(scaling_values)
         if not exists(scaling_file):
             #Output training scaling values
             print('Writing out {0}'.format(scaling_file))
@@ -391,90 +388,98 @@ class DLModeler(object):
         print('Training label data shape {0}\n'.format(np.shape(model_labels)))
         print('Validation data shape {0}'.format(np.shape(valid_data)))
         print('Validation label data shape {0}\n'.format(np.shape(valid_labels)))
-        #Create regularization object
-        regularizer_object = regularizers.l1_l2(l1=0, l2=0.001)
-        #Initiliaze Convolutional Neural Net (CNN)
-        model = models.Sequential()
-        #First layer, input shape (y,x,# variables) 
-        model.add(layers.Conv2D(40, (3,3), activation='relu', 
-                kernel_regularizer=regularizer_object,
-                input_shape=(np.shape(model_data[0]))
-                ))
-        model.add(layers.Dropout(0.25))
-        model.add(layers.BatchNormalization())
-        model.add(layers.MaxPooling2D())
         
-        #Second layer
-        model.add(layers.Conv2D(80, (3,3),kernel_regularizer=regularizer_object,activation='relu'))
-        model.add(layers.Dropout(0.25))
-        model.add(layers.BatchNormalization())
-        model.add(layers.MaxPooling2D())
-        
-        #Third layer
-        model.add(layers.Conv2D(160, (3,3),kernel_regularizer=regularizer_object,activation='relu'))
-        model.add(layers.Dropout(0.25))
-        model.add(layers.BatchNormalization())
-        model.add(layers.MaxPooling2D())
-        
-        #Flatten the last convolutional layer into a long feature vector
-        model.add(layers.Flatten())
-        model.add(layers.Dense(512,kernel_regularizer=regularizer_object, activation='relu'))
-        model.add(layers.Dropout(0.5))
-        model.add(layers.BatchNormalization())
-        model.add(layers.Dense(4, kernel_regularizer=regularizer_object, activation='softmax'))
-        #Compile neural net
-        model.compile(optimizer='adam',loss='categorical_crossentropy',
-                metrics=[tf.keras.metrics.AUC()])
-        print(model.summary())
-        #Fit neural net
-        n_epochs = 80
-        conv_hist = model.fit(model_data,model_labels,
-                epochs=n_epochs,batch_size=1000,verbose=1,
-                class_weight=self.class_percentage)
-        #Save trained model
         model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model.h5'.format(
             member,self.start_dates['train'].strftime('%Y%m%d'),
             self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
-        model.save(model_file)
-        print('Writing out {0}'.format(model_file))
+        if not exists(model_file):
+            #Initiliaze Convolutional Neural Net (CNN)
+            model = models.Sequential()
+            #First layer, input shape (y,x,# variables) 
+            model.add(layers.Conv2D(80, (3,3), 
+                input_shape=(np.shape(model_data[0])),
+                padding='same'))
+            model.add(layers.BatchNormalization())
+            model.add(layers.Activation("relu"))
+            model.add(layers.MaxPooling2D())
+        
+            #Second layer
+            model.add(layers.Conv2D(160, (3,3),padding='same'))
+            model.add(layers.BatchNormalization())
+            model.add(layers.Activation("relu"))
+            model.add(layers.MaxPooling2D())
+        
+            #Third layer
+            model.add(layers.Conv2D(320, (3,3),padding='same'))
+            model.add(layers.BatchNormalization())
+            model.add(layers.Activation("relu"))
+            model.add(layers.MaxPooling2D())
+        
+            #Flatten the last convolutional layer into a long feature vector
+            model.add(layers.Flatten())
+            model.add(layers.Dense(512,activation='relu'))
+            model.add(layers.Dropout(0.5))
+            model.add(layers.Dense(4,activation='softmax'))
+            #Compile neural net
+            model.compile(optimizer='adam',loss='categorical_crossentropy',
+                metrics=[tf.keras.metrics.AUC()])
+            print(model.summary())
+            #Fit neural net
+            n_epochs = 20
+            conv_hist = model.fit(model_data,model_labels,
+                epochs=n_epochs,batch_size=1024,verbose=1,
+                class_weight=self.class_percentage)
+            #Save trained model
+            model.save(model_file)
+            print('Writing out {0}'.format(model_file))
+        else:
+            print('Opening {0}'.format(model_file))
+            model = models.load_model(model_file)
+
         del model_labels,model_data
         
         #Find the threshold with the highest AUC score 
         #on validation data
+        threshold_model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model_threshold.h5'.format(
+            member,self.start_dates['train'].strftime('%Y%m%d'),
+            self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
         
+        if exists(threshold_model_file): 
+            del valid_data,valid_labels
+            return
+
         cnn_preds = model.predict(valid_data)
         del valid_data
-        no_hail = cnn_preds[:,0]
-        no_sev_hail = cnn_preds[:,1]
+        #no_hail = cnn_preds[:,0]
+        #no_sev_hail = cnn_preds[:,1]
         sev_hail = cnn_preds[:,2]
         sig_hail = cnn_preds[:,3]
 
-        sev_prob_preds = np.where( (no_hail+no_sev_hail) < (sev_hail+sig_hail), 1, 0)
+        print(np.nanmax(sev_hail))
+        sev_prob_preds = sev_hail+sig_hail
+        #sev_hail+sig_hail #np.where( (no_hail+no_sev_hail) < (sev_hail+sig_hail), 1, 0)
 
-        df_best_score = pd.DataFrame( np.zeros((1,1)),cols='size_threshold') 
-        m = tf.keras.metrics.AUC(num_thresholds=50)
+        df_best_score = pd.DataFrame(np.zeros((1, 1)),columns=['size_threshold'])
+        m = tf.keras.metrics.AUC(num_thresholds=20)
         
         prob_threshold_score = []
-        thresholds = np.arange(0.05,0.96,0.05)
+        thresholds = np.arange(0.01,0.97,0.01)
         true_preds = np.where(valid_labels >= 2, 1, 0)
         del valid_labels
         for prob_thresh in thresholds:
             threshold_preds = np.where(sev_prob_preds >= prob_thresh,1,0)
             m.update_state(true_preds,threshold_preds)
             prob_threshold_score.append(m.result().numpy() )
+        print(prob_threshold_score)
+        df_best_score.loc[0,'size_threshold'] = thresholds[np.argmax(prob_threshold_score)]
+        print(df_best_score)
 
-        def_best_score.loc[0,'size_threshold'] = thresholds[np.argmax(prob_threshold_score)]
-        print(def_best_score)
-
-        threshold_model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model_threshold.h5'.format(
-            member,self.start_dates['train'].strftime('%Y%m%d'),
-            self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
         print('Writing out {0}'.format(threshold_model_file))
-        def_best_score.to_csv(threshold_model_file)
+        df_best_score.to_csv(threshold_model_file)
         
         return 
     
-    def gridded_forecasts(self,forecasts,map_file):
+    def gridded_forecasts(self,forecasts,inds,mapping_data,subset_data):
         """
         Function that opens map files over the total data domain
         and the subset domain (CONUS). Projects the patch data on 
@@ -485,37 +490,27 @@ class DLModeler(object):
             map_file (str): Filename and path to total domain map file
         """
         
-        #Open mapfile over total domain
-        proj_dict, grid_dict = read_ncar_map_file(map_file)
-        mapping_data = make_proj_grids(proj_dict, grid_dict)
-        
-        #Create cKDtree to convert patch grid points to the total domain
-        tree = cKDTree(np.c_[mapping_data['lon'].ravel(),mapping_data['lat'].ravel()])
-
-        #Open mapfile over subset domain (CONUS)
-        subset_map_file = glob(self.hf_path+'/*map*.h5')[0] 
-        subset_data = h5py.File(subset_map_file, 'r')['data']
-        
-        #Convert subset grid points to total grid using cKDtree
-        _,inds = tree.query(np.c_[subset_data[0].ravel(),
-                        subset_data[1].ravel()])
         #Fill in total grid with predicted probabilities
         gridded_predictions = np.zeros((forecasts.shape[0],forecasts.shape[1],) +\
             mapping_data['lat'].ravel().shape )
         #Patch size to fill probability predictions
         subset_data_shape = np.array(subset_data.shape)[-2:]
+        print(subset_data.shape)
         #Grid to project subset data onto
         total_grid = np.zeros_like( mapping_data['lat'].ravel() )
-        
         #Output subset data onto full grid using indices from cKDtree
         for hail_size in np.arange(np.shape(forecasts)[0]):
             hail_size_pred = forecasts[hail_size]
             for hour in np.arange(hail_size_pred.shape[0]):
                 prob_on_patches = []
                 for patch in np.arange(hail_size_pred.shape[1]):
-                    prob_on_patches.append(np.full(subset_data_shape, hail_size_pred[hour,patch]))
+                    if hail_size_pred[hour,patch] > 0:
+                        print(patch)
+                        return
+                    #prob_on_patches.append(np.full(subset_data_shape, hail_size_pred[hour,patch]))
+        '''
                 total_grid[inds] = np.array(prob_on_patches).ravel()
                 gridded_predictions[hail_size,hour] = total_grid
         final_grid_shape = (forecasts.shape[0],forecasts.shape[1],)+mapping_data['lat'].shape
         return gridded_predictions.reshape(final_grid_shape)
-        
+        '''

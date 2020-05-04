@@ -1,10 +1,13 @@
 #!/usr/bin/env python
+from util.make_proj_grids import make_proj_grids, read_ncar_map_file
 from sklearn.preprocessing import OneHotEncoder
 from processing.DLModeler import DLModeler
-from util.Config import Config
 from tensorflow.keras import models
+from scipy.spatial import cKDTree
 from multiprocessing import Pool
+from util.Config import Config
 import multiprocessing as mp
+from glob import glob
 import argparse, pdb
 import pandas as pd
 import numpy as np
@@ -53,17 +56,32 @@ def main():
         config.start_dates,config.end_dates,config.num_examples,
         config.class_percentages,config.patch_radius,
         config.run_date_format,np.array(short_variable_names)) 
-    
+
     if args.train:
         for member in config.ensemble_members:
             train_models(config,dlmodel,member)
     elif args.fore:
+        print('\nCreating cKDtree to map patches onto the total grid') 
+        #Open mapfile over total domain
+        proj_dict, grid_dict = read_ncar_map_file(config.model_map_file)
+        mapping_data = make_proj_grids(proj_dict, grid_dict)
+        
+        #Create cKDtree to convert patch grid points to the total domain
+        tree = cKDTree(np.c_[mapping_data['lon'].ravel(),mapping_data['lat'].ravel()])
+
+        #Open mapfile over subset domain (CONUS)
+        subset_map_file = glob(config.hf_path+'/*map*.h5')[0] 
+        subset_data = h5py.File(subset_map_file, 'r')['data']
+        #Convert subset grid points to total grid using cKDtree
+        _,inds = tree.query(np.c_[subset_data[0].ravel(),
+                        subset_data[1].ravel()])
+    
         forecast_dates = pd.date_range(start=config.start_dates['forecast'],
             end=config.end_dates['forecast'],freq='1D').strftime(config.run_date_format)
         for date in forecast_dates:
             for member in config.ensemble_members:
-                patch_data = predict_models(config,dlmodel,member,date)
-                gridded_output(config,dlmodel,member,date,patch_data)
+                gridded_data = predict_models(config,dlmodel,member,date,subset_data,mapping_data,inds)
+                gridded_output(config,dlmodel,member,date,gridded_data) #,inds,mapping_data,subset_data)
     return
 
 def train_models(config,dlmodel,member):
@@ -89,7 +107,7 @@ def train_models(config,dlmodel,member):
     return 
 
 
-def predict_models(config,dlmodel,member,date):
+def predict_models(config,dlmodel,member,date,subset_data,mapping_data,inds):
     """
     Function that opens a pre-trained convolutional neural net (cnn). 
     and predicts hail probability forecasts for a single ensemble member.
@@ -114,47 +132,52 @@ def predict_models(config,dlmodel,member,date):
             config.end_dates['train'].strftime('%Y%m%d'),config.num_examples)
     #Load saved CNN model
     cnn_model = models.load_model(cnn_model_file) 
-    
-    patch_predictions = np.empty( (2,forecast_data.shape[0],forecast_data.shape[1]) )*np.nan
-    #Produce hail forecast using standardized forecast data every hour
-    reshaped_forecast_data = forecast_data.reshape(-1,*forecast_data.shape[-3:])
-    standard_forecast_data = dlmodel.standardize_data(member,reshaped_forecast_data) 
-    print(np.shape(standard_forecast_data))
-    #Predict probability of severe hail
-    cnn_preds = cnn_model.predict(standard_forecast_data)
-    
+    '''
     #Use minimum prob threshold chosen with validation data
     threshold_model_file = config.model_path+'/{0}_{1}_{2}_{3}_CNN_model_threshold.h5'.format(
             member,config.start_dates['train'].strftime('%Y%m%d'),
             config.end_dates['train'].strftime('%Y%m%d'),config.num_examples)
-    
-    if not os.path.exists(prob_model_file):
+    if not os.path.exists(threshold_model_file):
         print('No thresholds found')
         return 
     prob_thresholds = pd.read_csv(threshold_model_file)
-    threshold_sev_probs = np.where( (cnn_preds[:,2]+cnn_preds[:,3]) >= prob_thresholds.loc[0,'size_threshold'], 1, 0)
-    threshold_sig_probs = np.where(
-                ((cnn_preds[:,2]+cnn_preds[:,3]) >= prob_thresholds.loc[0,'size_threshold']) &
-                (cnn_preds[:,3] > cnn_preds[:,2]), 1,0)
+    '''
+    if member in ['nssl_12']:
+        prob_thresh = 0.24
+    elif member in ['arw_00','nmmb_00','nmmb_12']:
+        prob_thresh = 0.18
+    elif member in ['nssl_00']:
+        prob_thresh = 0.155
+    elif member in ['arw_12']:
+        prob_thresh = 0.14
+    elif member in ['nam_12']:
+        prob_thresh = 0.16
+    else:
+        prob_thresh = 18
+    #Produce hail forecast using standardized forecast data every hour
+    total_grid = np.zeros((2,forecast_data.shape[0],)+mapping_data['lat'].ravel().shape)
+    total_count = 0
+    for hour in np.arange(forecast_data.shape[0]):
+        sev_subset_patches = np.zeros_like(subset_data[0])
+        sig_subset_patches = np.zeros_like(subset_data[0])
+        standard_forecast_data = dlmodel.standardize_data(member,forecast_data[hour])
+        #Predict probability of severe hail
+        cnn_preds = cnn_model.predict(standard_forecast_data)
+        sev_prob_inds = np.where( (cnn_preds[:,2]+cnn_preds[:,3]) >= prob_thresh)[0]
+        #sig_prob_inds = np.where(
+        #        ((cnn_preds[:,2]+cnn_preds[:,3]) >= prob_thresholds.loc[0,'size_threshold']) &
+        #        (cnn_preds[:,3] > cnn_preds[:,2]) )[0]
+        if len(sev_prob_inds) >= 1: 
+            sev_subset_patches[sev_prob_inds] = np.full((config.patch_radius,config.patch_radius), 1)
+        #if len(sig_prob_inds) >= 1: 
+        #    sig_subset_patches[sig_prob_inds] = np.full((config.patch_radius,config.patch_radius), 1)
+        total_grid[0,hour,inds] = sev_subset_patches.ravel()
+        total_grid[1,hour,inds] = sig_subset_patches.ravel()
+        total_count += len(sev_prob_inds)
+    print('Total severe probs:',total_count)
+    print()
+    return total_grid.reshape( (2,forecast_data.shape[0],)+mapping_data['lat'].shape)
     
-    print('No. severe probs',np.count_nonzero(threshold_sev_probs))
-    print('No. sig severe probs',np.count_nonzero(threshold_sig_probs))
-    
-    patch_predictions = np.array([threshold_sev_probs.reshape(forecast_data.shape[0],forecast_data.shape[1]),
-        threshold_sig_probs.reshape(forecast_data.shape[0],forecast_data.shape[1])])
-    return patch_predictions
-
-def gridded_output(config,dlmodel,member,date,patch_data):
-    #Output gridded forecasts
-    date_outpath = config.forecast_grid_path + '{0}/'.format(date[:-5])
-    if not os.path.exists(date_outpath): os.makedirs(date_outpath)
-    gridded_out_file = date_outpath + '{0}_{1}_forecast_grid.h5'.format(member,date)
-    gridded_data = dlmodel.gridded_forecasts(patch_data,config.model_map_file)    
-    print('Writing out {0}'.format(gridded_out_file))
-    with h5py.File(gridded_out_file, 'w') as hf:
-        hf.create_dataset("data",data=gridded_data,
-            compression='gzip',compression_opts=6)
-    return
 
 if __name__ == "__main__":
     __spec__ = None

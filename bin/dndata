@@ -51,11 +51,12 @@ def main():
 
     #Process obs and ensemble data with parallelization
     pool = Pool(mp.cpu_count())
+    
     if args.obs or config.train is True:
         for run_date in config.dates:
             pool.apply_async(dlprocess.process_observational_data,
             (run_date,config.mrms_variable,config.mrms_path))
-    elif not args.obs:
+    if not args.obs:
         for run_date in config.dates:
             for member in config.ensemble_members:
                 pool.apply_async(dlprocess.process_ensemble_member,

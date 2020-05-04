@@ -150,7 +150,7 @@ def plot_period_prob(forecast_grid,start_time,end_time,date,
     ax.add_feature(cf.OCEAN)
     ax.add_feature(cf.BORDERS,linestyle='-')
     ax.add_feature(cf.STATES.with_scale('50m'),linestyle='-',edgecolor='black')
-    
+    ax.set_extent([lon_grid[0,0],lon_grid[-1,-1],lat_grid[0,0],lat_grid[-1,-1]],crs=ccrs.PlateCarree())
     #Create colormap
     cmap = matplotlib.colors.ListedColormap(
             ['#DBC6BD','#AD8877','#FCEA8D', 
