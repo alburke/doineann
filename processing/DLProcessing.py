@@ -8,12 +8,13 @@ import h5py
 import os
 
 class DLPreprocessing(object):
-    def __init__(self,ensemble_name,model_path,
+    def __init__(self,train,ensemble_name,model_path,
         hf_path,patch_radius,run_date_format,
         forecast_variables,storm_variables,
         potential_variables,start_hour,end_hour,
         mask=None):
         
+        self.train = train
         self.ensemble_name = ensemble_name
         self.model_path = model_path
         self.hf_path = hf_path
@@ -68,7 +69,7 @@ class DLPreprocessing(object):
         #Create gridded mrms object 
         gridded_obj = GridOutput(run_date,start_date,end_date)
         gridded_obs_data = gridded_obj.load_obs_data(mrms_variable,mrms_path)
-        if len(gridded_obs_data) < 1: 
+        if gridded_obs_data is None: 
             print('No observations on {0}'.format(start_date))
             return
         for hour in range(len(gridded_obs_data[1:])): 
@@ -80,9 +81,10 @@ class DLPreprocessing(object):
             #Label mrms data
             labels = self.label_obs_patches(hourly_obs_patches)
             obs_patch_labels.append(labels)
+        if np.nanmax(obs_patch_labels) == 0: return 
+        
         obs_filename = '{0}/obs/obs_{1}.h5'.format(self.hf_path,run_date.strftime(self.run_date_format)) 
         print('Writing obs file: {0}'.format(obs_filename))
-        
         #Write file out using Hierarchical Data Format 5 (HDF5) format. 
         with h5py.File(obs_filename, 'w') as hf:
             hf.create_dataset("data",data=obs_patch_labels,
@@ -104,7 +106,6 @@ class DLPreprocessing(object):
         end_date = run_date + timedelta(hours=self.end_hour)
         #Create gridded variable object 
         gridded_obj = GridOutput(run_date,start_date,end_date,member)
-
         print("Starting ens processing", member, run_date)
         #Slice each member variable separately over each hour
         for v,variable in enumerate(self.forecast_variables):
@@ -121,12 +122,11 @@ class DLPreprocessing(object):
                 else:masked_gridded_variable = gridded_variable_data[var_hour]
                 patches = self.slice_into_patches(masked_gridded_variable,self.patch_radius,self.patch_radius)
                 hourly_var_patches.append(patches)
-            
             #Shorten variable names
-            if " " in variable: 
+            if "_" in variable: 
                 variable_name= ''.join([v[0].upper() for v in variable.split()]) + variable.split('_')[-1]
-            elif "_" in variable: 
-                variable_name= ''.join([v[0].upper() for v in variable.split()]) + variable.split('_')[-1]
+            elif " " in variable: 
+                variable_name= ''.join([v[0].upper() for v in variable.split()])
             else:variable_name = variable
             var_filename = '{0}/{2}/{1}_{2}_{3}.h5'.format(member_path,
                 variable_name,member,run_date.strftime(self.run_date_format)) 

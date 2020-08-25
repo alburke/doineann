@@ -1,11 +1,11 @@
 from util.make_proj_grids import make_proj_grids, read_ncar_map_file
-from scipy.spatial import cKDTree
 from sklearn.utils import shuffle
 from os.path import exists
 from glob import glob
 import pandas as pd
 import numpy as np
 import random
+random.seed(42)
 import h5py
 
 #Parallelization packages
@@ -13,10 +13,11 @@ from multiprocessing import Pool
 import multiprocessing as mp
         
 #Deep learning packages
-from tensorflow.keras import models
 import tensorflow as tf
-from tensorflow.keras import layers
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras import layers,regularizers,models
+
+import matplotlib.pyplot as plt
+
 
 class DLModeler(object):
     def __init__(self,model_path,hf_path,start_dates,end_dates,
@@ -30,7 +31,18 @@ class DLModeler(object):
         self.class_percentage = class_percentage
         self.patch_radius = patch_radius
         self.run_date_format = run_date_format
-        self.forecast_variables = forecast_variables
+        
+        long_forecast_variables = []
+        #Shorten variable names
+        for variable in forecast_variables:
+            if "_" in variable: 
+                variable_name= ''.join([v[0].upper() for v in variable.split()]) + variable.split('_')[-1]
+            elif " " in variable: 
+                variable_name= ''.join([v[0].upper() for v in variable.split()])
+            else:variable_name = variable
+            long_forecast_variables.append(variable_name)
+        self.forecast_variables = np.array(long_forecast_variables)
+
         return
 
     def preprocess_training_data(self,member):
@@ -70,8 +82,15 @@ class DLModeler(object):
             print('Opening {0}'.format(model_training_data_filename))
             with h5py.File(model_training_data_filename, 'r') as mhf:
                 standard_member_model_data = mhf['data'][()]
+            '''
             print(np.shape(member_obs_label),np.shape(standard_member_model_data))
-            
+            c = standard_member_model_data.reshape(-1, standard_member_model_data.shape[-1])
+            print(np.nanmax(c,axis=0), np.nanmin(c,axis=0))
+
+            plt.figure(figsize=(30,30))
+            plt.boxplot(c,labels=self.forecast_variables)
+            plt.show()
+            '''
         else:
             if exists(training_filename): 
                 #Opening training examples data file
@@ -81,24 +100,35 @@ class DLModeler(object):
                 #Selecting random patches for training
                 patches = self.training_data_selection(member,training_filename)
             
+            #Extracting obs labels
+            member_obs_label = patches['Obs Label'].values.astype('int64')
+            with h5py.File(obs_training_labels_filename, 'w') as hf:
+                hf.create_dataset("data",data=member_obs_label)
+            print('Writing out {0}'.format(obs_training_labels_filename))
+            
             #Extracting model patch data
             member_model_data = self.read_files(mode,member,patches['Random Date'], 
                 patches['Random Hour'],patches['Random Patch'],patches['Data Augmentation'])
+            
             if member_model_data is None: print('No training data found')
             else:
+                #Augment data by adding small amounts of variance
+                augment_inds = np.where(patches['Data Augmentation'] >0.5)[0]
+                if len(augment_inds) >= 1:
+                    print('Augmenting data')
+                    print(len(augment_inds))
+                    for var in np.arange(len(self.forecast_variables)):
+                        total_var = np.nanvar(member_model_data[augment_inds,:,:,var])
+                        for example in np.arange(len(augment_inds)):
+                            member_model_data[example,:,:,var] =\
+                            member_model_data[example,:,:,var]+total_var*np.random.choice(np.arange(-0.3,0.31,0.01))
                 #Standardize data
+                #standard_member_model_data = member_model_data
                 standard_member_model_data = self.standardize_data(member,member_model_data,mode='train') 
                 with h5py.File(model_training_data_filename, 'w') as hf:
                     hf.create_dataset("data",data=standard_member_model_data)
                 print('Writing out {0}'.format(model_training_data_filename)) 
-        
-            member_obs_label = patches['Obs Label'].values
-            #Extracting obs labels
-            with h5py.File(obs_training_labels_filename, 'w') as hf:
-                hf.create_dataset("data",data=member_obs_label)
-                print('Writing out {0}'.format(obs_training_labels_filename))
-            #onehot_encoder = OneHotEncoder(sparse=False,categories='auto')
-            #member_obs_label = onehot_encoder.fit_transform(patches['Obs Label'].values.reshape(-1, 1))
+           
         return standard_member_model_data, member_obs_label
 
     def preprocess_validation_data(self,member):
@@ -123,50 +153,56 @@ class DLModeler(object):
         
         if exists(obs_validation_labels_filename) and exists(model_validation_data_filename): 
             #Opening validation files
-            print('Opening {0}'.format(obs_validation_labels_filename))
-            with h5py.File(obs_validation_labels_filename, 'r') as ohf:
-                validation_obs_data = ohf['data'][()]
-            
             print('Opening {0}'.format(model_validation_data_filename))
             with h5py.File(model_validation_data_filename, 'r') as mhf:
-                validation_standard_member_model_data = mhf['data'][()]
+                standard_validation_data = mhf['data'][()]
+            
+            print('Opening {0}'.format(obs_validation_labels_filename))
+            with h5py.File(obs_validation_labels_filename, 'r') as ohf:
+                reshaped_validation_obs = ohf['data'][()]
+            
         else:
             total_validation_dates = pd.date_range(start=self.start_dates['valid'],
                     end=self.end_dates['valid'],freq='1D').strftime('%Y%m%d').values
-            random.seed(42)
             random.shuffle(total_validation_dates)
-            validation_data = [] 
-            validation_obs_data = []
-            added_validation_dates = []
+            total_validation_obs = []
+            total_validation_data = []
             count=0
             print()
             for v_date in total_validation_dates:
-                if count == 10: break
+                if count == 5: break
                 obs_file = glob(self.hf_path + '/obs/*obs*{0}*'.format(v_date))
+                model_file = glob(self.hf_path + '/{0}/*{1}*'.format(member,v_date))
                 if len(obs_file) < 1: continue 
+                if len(model_file) < len(self.forecast_variables): continue
                 #Open obs file
                 with h5py.File(obs_file[0], 'r') as hf:
                     obs = hf['data'][()]
                 if np.nanmax(obs) < 3: continue
+                no_hail_hours,no_hail_patches = np.where(obs == 0)
+                validation_data = self.read_files('forecast',member,v_date)
+                if validation_data is None: continue
                 print('Adding {0} to validation set'.format(v_date))
-                validation_obs_data.append(obs)
-                added_validation_dates.append(v_date)
+                total_validation_obs.extend(obs[no_hail_hours,no_hail_patches].ravel())
+                total_validation_data.extend(validation_data[no_hail_hours,no_hail_patches,:,:,:])
                 count +=1
-            
-            validation_data = self.read_files('forecast',member,added_validation_dates)
-            validation_member_data = np.array(validation_data).reshape(-1,
-                *np.array(validation_data).shape[-3:])
-            
-            validation_standard_member_model_data = self.standardize_data(member,validation_member_data)
-            with h5py.File(model_validation_data_filename, 'w') as hf:
-                hf.create_dataset("data",data=validation_standard_member_model_data)
-                print('Writing out {0}'.format(model_validation_data_filename)) 
-            
+            reshaped_validation_data = np.array(total_validation_data).reshape(-1,
+                *np.shape(total_validation_data)[-3:])
+            reshaped_validation_obs = np.array(total_validation_obs).ravel()
+            print(np.count_nonzero(reshaped_validation_obs))
+            print(len(reshaped_validation_obs))
+            #Standardize validation data 
+            standard_validation_data = self.standardize_data(member,reshaped_validation_data)
+            #Output data
             with h5py.File(obs_validation_labels_filename, 'w') as hf:
-                hf.create_dataset("data",data=np.array(validation_obs_data).ravel())
-                print('Writing out {0}'.format(obs_validation_labels_filename))
+                hf.create_dataset("data",data=reshaped_validation_obs) 
+            print('Writing out {0}'.format(obs_validation_labels_filename))
             
-        return validation_standard_member_model_data,np.array(validation_obs_data).ravel()
+            with h5py.File(model_validation_data_filename, 'w') as hf:
+                hf.create_dataset("data",data=standard_validation_data)
+            print('Writing out {0}'.format(model_validation_data_filename)) 
+            print(np.shape(standard_validation_data),np.shape(reshaped_validation_obs)) 
+        return standard_validation_data,reshaped_validation_obs
 
 
     def training_data_selection(self,member,training_filename):
@@ -197,8 +233,14 @@ class DLModeler(object):
             for c,category in enumerate(self.class_percentage.keys()):
                 #Loop through each date
                 all_days_obs_data = []
+                var_file = self.hf_path + '/{0}/*{1}*{2}*.h5'
                 for str_date in string_dates:
                     #If there are model or obs files, continue to next date
+                    
+                    #imodel_file = [glob(var_file.format(member,variable,str_date))[0]
+                    #    for variable in self.forecast_variables
+                    #    if len(glob(var_file.format(member,variable,str_date))) == 1]
+                
                     model_file = glob(self.hf_path + '/{0}/*{1}*'.format(member,str_date))
                     obs_file = glob(self.hf_path + '/obs/*obs*{0}*'.format(str_date))
                     if len(model_file) < len(self.forecast_variables): continue
@@ -215,19 +257,22 @@ class DLModeler(object):
                 df_all_days_obs_data = pd.DataFrame(all_days_obs_data,columns=cols[:3])
                 #Find the number of desired examples per category
                 subset_class_examples = int(self.num_examples*self.class_percentage[category])
-                print(subset_class_examples)
+                print(category, len(df_all_days_obs_data),subset_class_examples, len(df_all_days_obs_data)/subset_class_examples)
                 if len(df_all_days_obs_data) < subset_class_examples:
-                    data_augment = 1
-                    randomly_sampled_patches = df_all_days_obs_data.sample(
-                    n=subset_class_examples,replace=True) 
+                    n_aug = subset_class_examples-len(df_all_days_obs_data)
+                    randomly_sampled_patches_augment = df_all_days_obs_data.sample(
+                            n=n_aug,replace=True,random_state=42)
+                    df_all_days_obs_data['Data Augmentation'] = 0
+                    randomly_sampled_patches_augment['Data Augmentation'] = 1
+                    randomly_sampled_patches = pd.concat([randomly_sampled_patches_augment, 
+                        df_all_days_obs_data], ignore_index=True) 
                 else:
-                    data_augment = 0
                     randomly_sampled_patches = df_all_days_obs_data.sample(
-                    n=subset_class_examples,replace=False) 
+                        n=subset_class_examples,replace=False,random_state=42) 
+                    randomly_sampled_patches['Data Augmentation'] = 0    
                 randomly_sampled_patches['Obs Label'] = category
-                randomly_sampled_patches['Data Augmentation'] = data_augment    
-                obs_categories_examples = obs_categories_examples.append(randomly_sampled_patches,ignore_index=True)
-            obs_categories_examples = obs_categories_examples.sort_values(by='Random Date')
+                obs_categories_examples = obs_categories_examples.append(randomly_sampled_patches,ignore_index=True,sort=True)
+            obs_categories_examples = obs_categories_examples.sample(frac=1, axis=1).sample(frac=1).reset_index(drop=True)  
             print(obs_categories_examples)
             print('Writing out {0}'.format(training_filename))
             obs_categories_examples.to_csv(training_filename)
@@ -254,7 +299,7 @@ class DLModeler(object):
         #Start up parallelization
         pool = Pool(mp.cpu_count())
         print('Reading {0} unique {1} date file(s)'.format(len(np.unique(dates)), member))
-        var_file = self.hf_path + '/{0}/*{1}*{2}*.h5'
+        var_file = self.hf_path + '/{0}/{1}*{2}*.h5'
         for d,date in enumerate(np.unique(dates)):
             #Find all model variable files for a given date
             var_files = [glob(var_file.format(member,variable,date))[0]
@@ -270,8 +315,7 @@ class DLModeler(object):
                     patch[date_inds].values,data_augment[date_inds].values)
                 total_patch_data.append(pool.apply_async(self.extract_data,args))
             #Extract forecast data
-            elif mode =='forecast': 
-                total_patch_data.append(pool.apply_async(self.extract_data,(mode,var_files)))
+            elif mode =='forecast': total_patch_data.append(pool.apply_async(self.extract_data,(mode,var_files)))
         pool.close()
         pool.join()
 
@@ -282,17 +326,7 @@ class DLModeler(object):
             return np.array(total_unique_patch_data)
         else:
             return None
-        '''
-        elif mode=='train':
-            total_unique_patch_data  = [data for pool_file in total_patch_data for data in pool_file.get()]
-            return np.array(total_unique_patch_data)
-        else: 
-            if len(total_patch_data) >= 1:
-                total_unique_patch_data  = [data for pool_file in total_patch_data for data in pool_file.get()]
-                return np.array(total_unique_patch_data)
-            else:
-                return None
-        '''
+    
     def extract_data(self,mode,files,hours=None,patches=None,data_augment=None):
         """
         Function to extract training and forecast patch data
@@ -320,12 +354,7 @@ class DLModeler(object):
                 compressed_patch_data = hf['data']
                 if mode =='train':
                     for i in np.arange(len(hours)):
-                        if data_augment[i] > 0.5:
-                            #Augment data by adding small amounts of variance
-                            var_data = compressed_patch_data[hours[i],patches[i],:,:].ravel()
-                            noise = np.nanvar(var_data)*np.random.choice(np.arange(-0.1,0.11,0.01))
-                            patch_data[i,:,:,v] = (var_data + noise).reshape((self.patch_radius,self.patch_radius))
-                        else: patch_data[i,:,:,v] = compressed_patch_data[hours[i],patches[i],:,:]
+                        patch_data[i,:,:,v] = compressed_patch_data[hours[i],patches[i],:,:]
                 else: patch_data[:,:,:,:,v] = compressed_patch_data[()]
         return patch_data
     
@@ -351,17 +380,24 @@ class DLModeler(object):
         
         else:
             scaling_values = pd.DataFrame(np.zeros((len(self.forecast_variables), 2), 
-                dtype=np.float32),columns=['first','ninety-ninth'])
+                dtype=np.float32),columns=['max','min'])
+                #dtype=np.float32),columns=['mean','std'])
         
         #Standardize data
         standard_model_data = np.empty( np.shape(model_data) )*np.nan
         for n in np.arange(model_data.shape[-1]):
-            if not exists(scaling_file):
-                scaling_values.loc[n, ['first','ninety-ninth']] = [np.nanpercentile(model_data[:,:,:,n],1),
-                    np.nanpercentile(model_data[:,:,:,n],99)]
-            standard_range = (scaling_values.loc[n,'ninety-ninth']-scaling_values.loc[n,'first'])
-            standard_model_data[:,:,:,n] = (model_data[:,:,:,n]-scaling_values.loc[n,'first'])/standard_range
+            three_std = 3*np.nanstd(model_data[:,:,:,n]) + np.nanmean(model_data[:,:,:,n])
+            data = np.where(abs(model_data[:,:,:,n]) >= three_std, np.nanmean(model_data[:,:,:,n]),model_data[:,:,:,n])
+            print(np.shape(data))
+            print(np.nanmax(data),np.nanmin(data))
             
+            if not exists(scaling_file):
+                #scaling_values.loc[n, ['mean','std']] = [np.nanmean(model_data[:,:,:,n]),np.nanstd(model_data[:,:,:,n])]
+                scaling_values.loc[n, ['max','min']] = [np.nanmax(data),np.nanmin(data)]
+
+            #standard_model_data[:,:,:,n] = (model_data[:,:,:,n]-scaling_values.loc[n,'mean'])/(scaling_values.loc[n,'std'])
+            standard_model_data[:,:,:,n] = (data-scaling_values.loc[n,'min'])/(scaling_values.loc[n,'max'] - scaling_values.loc[n,'min'])
+        
         if not exists(scaling_file):
             #Output training scaling values
             print('Writing out {0}'.format(scaling_file))
@@ -385,62 +421,92 @@ class DLModeler(object):
         print('Training label data shape {0}\n'.format(np.shape(model_labels)))
         print('Validation data shape {0}'.format(np.shape(valid_data)))
         print('Validation label data shape {0}\n'.format(np.shape(valid_labels)))
-
-        #Initiliaze Convolutional Neural Net (CNN)
-        model = models.Sequential()
-        #First layer, input shape (y,x,# variables) 
-        model.add(layers.Conv2D(32, (5,5), activation='relu', 
-                input_shape=(np.shape(model_data[0]))
-                ))
-        model.add(layers.AveragePooling2D())
-        #model.add(layers.Dropout(0.3))
-        #Second layer
-        model.add(layers.Conv2D(64, (3,3),activation='relu'))
-        model.add(layers.AveragePooling2D())
-        #model.add(layers.Dropout(0.3))
-        #Third layer
-        model.add(layers.Conv2D(128, (3,3),activation='relu'))
-        model.add(layers.AveragePooling2D())
-        #model.add(layers.Dropout(0.3))
-        #Flatten the last convolutional layer into a long feature vector
-        model.add(layers.Flatten())
-        model.add(layers.Dense(256, activation='relu'))
-        model.add(layers.Dense(2, activation='softmax'))
-        #Compile neural net
-        model.compile(optimizer='adam',loss='categorical_crossentropy',
-                metrics=[tf.keras.metrics.AUC()])
-        print(model.summary())
-        #Fit neural net
-        #X_train, X_test, y_train, y_test = train_test_split(model_data,model_labels,
-        #    test_size=0.2,shuffle=True)
         
-        #es = EarlyStopping(monitor='val_loss',mode='min',verbose=1,patience=20)
-        n_epochs = 80
-        conv_hist = model.fit(model_data,model_labels,
-                epochs=n_epochs,batch_size=1000,verbose=1)
-        #Save trained model
         model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model.h5'.format(
             member,self.start_dates['train'].strftime('%Y%m%d'),
             self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
-        model.save(model_file)
-        print('Writing out {0}'.format(model_file))
+        if not exists(model_file):
+            #Initiliaze Convolutional Neural Net (CNN)
+            model = models.Sequential()
+            #First layer, input shape (y,x,# variables) 
+            model.add(layers.Conv2D(32, (3,3), 
+                input_shape=(np.shape(model_data[0])),
+                padding='same'))
+            model.add(layers.BatchNormalization())
+            model.add(layers.LeakyReLU(alpha=0.3))
+            model.add(layers.MaxPooling2D())
+        
+            #Second layer
+            model.add(layers.Conv2D(64, (3,3),padding='same'))
+            model.add(layers.BatchNormalization())
+            model.add(layers.LeakyReLU(alpha=0.3))
+            #model.add(layers.Activation("relu"))
+            model.add(layers.MaxPooling2D())
+        
+            #Third layer
+            model.add(layers.Conv2D(128, (3,3),padding='same'))
+            model.add(layers.BatchNormalization())
+            model.add(layers.LeakyReLU(alpha=0.3))
+            #model.add(layers.Activation("relu"))
+            model.add(layers.MaxPooling2D())
+        
+            #Flatten the last convolutional layer into a long feature vector
+            model.add(layers.Flatten())
+            model.add(layers.Dropout(0.10))
+            model.add(layers.Dense(512))
+            model.add(layers.LeakyReLU(alpha=0.3))
+            model.add(layers.Dense(4,activation='softmax'))
+            #Compile neural net
+            model.compile(optimizer='adam',loss='categorical_crossentropy',
+                metrics=[tf.keras.metrics.AUC()])
+            print(model.summary())
+            #Fit neural net
+            n_epochs = 40
+            conv_hist = model.fit(model_data,model_labels,
+                epochs=n_epochs,batch_size=512,verbose=1,
+                class_weight=self.class_percentage)
+            #Save trained model
+            model.save(model_file)
+            print('Writing out {0}'.format(model_file))
+        else:
+            print('Opening {0}'.format(model_file))
+            model = models.load_model(model_file)
+
         del model_labels,model_data
         
         #Find the threshold with the highest AUC score 
         #on validation data
+        threshold_model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model_threshold.h5'.format(
+            member,self.start_dates['train'].strftime('%Y%m%d'),
+            self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
         
-        preds = model.predict(valid_data)[:,0]
-        m = tf.keras.metrics.AUC(num_thresholds=50)
-        prob_threshold_score = np.empty_like(valid_labels)*np.nan
-        for p,prob_thresh in enumerate(np.arange(0.02,1.01,0.02)):
-            threshold_preds = np.where(preds > prob_thresh,1,0)
-            m.update_state(valid_labels,threshold_preds)
-            prob_threshold_score[p] = m.result().numpy())  
-        del valid_labels,valid_data
+        if exists(threshold_model_file): 
+            del valid_data,valid_labels
+            return
+
+        cnn_preds = model.predict(valid_data)
+        del valid_data
+        sev_hail = cnn_preds[:,2]
+        sig_hail = cnn_preds[:,3]
+        sev_prob_preds = sev_hail+sig_hail
+        print(np.nanmax(sev_prob_preds))
+        df_best_score = pd.DataFrame(np.zeros((1, 1)),columns=['size_threshold'])
+        thresholds = np.arange(0.01,0.97,0.01)
+        true_preds = np.where(valid_labels >= 2, 1, 0)
+        del valid_labels
+        for prob_thresh in thresholds:
+            threshold_preds = np.where(sev_prob_preds >= prob_thresh,1,0)
+            print(np.count_nonzero(threshold_preds))
+            if np.count_nonzero(threshold_preds) <= 50:
+                df_best_score.loc[0,'size_threshold'] = prob_thresh
+                break
+        print(df_best_score)
+        print('Writing out {0}'.format(threshold_model_file))
+        df_best_score.to_csv(threshold_model_file)
         
         return 
     
-    def gridded_forecasts(self,forecasts,map_file):
+    def gridded_forecasts(self,forecasts,inds,mapping_data,subset_data):
         """
         Function that opens map files over the total data domain
         and the subset domain (CONUS). Projects the patch data on 
@@ -451,46 +517,27 @@ class DLModeler(object):
             map_file (str): Filename and path to total domain map file
         """
         
-        #Open mapfile over total domain
-        proj_dict, grid_dict = read_ncar_map_file(map_file)
-        mapping_data = make_proj_grids(proj_dict, grid_dict)
-        #center_grid_point = int(np.ceil(self.patch_radius/2.0))
-        
-        #Create cKDtree to convert patch grid points to the total domain
-        tree = cKDTree(np.c_[mapping_data['lon'].ravel(),mapping_data['lat'].ravel()])
-
-        #Open mapfile over subset domain (CONUS)
-        subset_map_file = glob(self.hf_path+'/*map*.h5')[0] 
-        subset_data = h5py.File(subset_map_file, 'r')['data']
-        
-        #Convert subset grid points to total grid using cKDtree
-        _,inds = tree.query(np.c_[subset_data[0].ravel(),
-                        subset_data[1].ravel()])
         #Fill in total grid with predicted probabilities
-        gridded_predictions = np.zeros( (forecasts.shape[0],forecasts.shape[1],) +\
+        gridded_predictions = np.zeros((forecasts.shape[0],forecasts.shape[1],) +\
             mapping_data['lat'].ravel().shape )
         #Patch size to fill probability predictions
         subset_data_shape = np.array(subset_data.shape)[-2:]
+        print(subset_data.shape)
         #Grid to project subset data onto
         total_grid = np.zeros_like( mapping_data['lat'].ravel() )
-        for size_pred in np.arange(forecasts.shape[0]):
-            for hour in np.arange(forecasts.shape[1]):
+        #Output subset data onto full grid using indices from cKDtree
+        for hail_size in np.arange(np.shape(forecasts)[0]):
+            hail_size_pred = forecasts[hail_size]
+            for hour in np.arange(hail_size_pred.shape[0]):
                 prob_on_patches = []
-                for patch in np.arange(forecasts.shape[2]):
-                    patch_data = forecasts[size_pred,hour,patch]
-                    if patch_data < 0.5: patch_data = 0.0
-                    '''
-                    if size_pred == 0:
-                        if patch_data > 0.45: patch_data=1.0
-                        else:patch_data=0.0
-                    if size_pred == 1:
-                        if patch_data > 0.30: patch_data=1.0
-                        else:patch_data=0.0
-                    '''
-                    prob_on_patches.append(np.full(subset_data_shape, patch_data))
-                #Output subset data onto full grid using indices from cKDtree
+                for patch in np.arange(hail_size_pred.shape[1]):
+                    if hail_size_pred[hour,patch] > 0:
+                        print(patch)
+                        return
+                    #prob_on_patches.append(np.full(subset_data_shape, hail_size_pred[hour,patch]))
+        '''
                 total_grid[inds] = np.array(prob_on_patches).ravel()
-                gridded_predictions[size_pred,hour,:] = total_grid
+                gridded_predictions[hail_size,hour] = total_grid
         final_grid_shape = (forecasts.shape[0],forecasts.shape[1],)+mapping_data['lat'].shape
         return gridded_predictions.reshape(final_grid_shape)
-        
+        '''

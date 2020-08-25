@@ -1,17 +1,11 @@
 #!/usr/bin/env python
-#from .Grib_ModelGrid import Grib_ModelGrid
 from datetime import timedelta 
-import numpy as np
-from glob import glob
-import os
-
-#!/usr/bin/env python
-import pandas as pd
-import pygrib
-import numpy as np
-from os.path import exists
-import datetime
 from netCDF4 import Dataset
+from glob import glob
+import pandas as pd
+import numpy as np
+import pygrib
+
 
 '''
 Gagne II, D. J., A. McGovern, N. Snook, R. Sobash, J. Labriola, J. K. Williams, S. E. Haupt, and M. Xue, 2016: 
@@ -34,6 +28,7 @@ class GridOutput(object):
         self.forecast_hours = np.arange((start_date-run_date).total_seconds() / 3600,
                                         (end_date-run_date).total_seconds() / 3600 + 1, dtype=int)
 
+
     def find_data_files(self,model_path):
         filenames = []
         day_before_date = (self.run_date-timedelta(days=1)).strftime("%Y%m%d") 
@@ -51,7 +46,7 @@ class GridOutput(object):
                 files = glob('{0}/{1}/nam*conusnest*{2}f*{3}*'.format(model_path,
                         date,inilization,forecast_hr))
                 if not files:
-                    files = glob('{0}/{1}/nam*t{2}z*conusnest*{3}*'.format(model_path,
+                    files = glob('{0}/{1}/nam*t{2}z*{3}*'.format(model_path,
                             date,inilization,forecast_hr))
             else:
                 files = glob('{0}/{1}/*hiresw*conus{2}*{3}f*{4}*'.format(model_path,
@@ -60,7 +55,7 @@ class GridOutput(object):
                 filenames.append(files[0])
         return filenames
     
-    def load_model_data(self,model_variable,model_path):
+    def load_model_data(self,model_variable,model_path,data=None):
         """
         Loads data from grib2 file objects or list of grib2 file objects. 
         Handles specific grib2 variable names and grib2 message numbers.
@@ -68,15 +63,13 @@ class GridOutput(object):
         Returns:
             Array of data loaded from files in (time, y, x) dimensions, Units
         """
-        data=None
         filenames = self.find_data_files(model_path)
         #Open each file for reading.
-        file_objects = [f for f in filenames if exists(f)]
-        if len(file_objects) <1: 
+        if len(filenames) <1: 
             print("No {0} model runs on {1}".format(self.member,self.run_date))
             units = None
             return data
-        for f, g_file in enumerate(file_objects):
+        for f, g_file in enumerate(filenames):
             if type(model_variable) is int:
                 grib = pygrib.open(file)
                 data_values = grib[model_variable].values
@@ -96,6 +89,7 @@ class GridOutput(object):
                         data_values = grib.select(parameterNumber=Id, level=int(level))[0].values
                         grib.close()
                     else:
+                        
                         grib = pygrib.index(g_file,'name','level')
                         data_values = grib.select(name=variable, level=int(level))[0].values
                         grib.close()
@@ -114,11 +108,10 @@ class GridOutput(object):
                             units = grib.select(name=model_variable)[0].units
                         grib.close()
             if data is None:
-                data = np.empty((len(self.valid_dates), data_values.shape[0], data_values.shape[1]), dtype=float)*np.nan
+                data = np.empty((len(self.valid_dates), data_values.shape[0], data_values.shape[1]), dtype=float)
                 data[f]=data_values[:]
             else:
                 data[f]=data_values[:]
-            del data_values
         return data
         
     def format_grib_name(self,selected_variable):
@@ -168,7 +161,7 @@ class GridOutput(object):
         obs_file = [glob(filename_args.format(obs_path,obs_variable,date))[0] 
                     for date in [self.run_date.strftime("%Y%m%d"),next_date]
                     if len(glob(filename_args.format(obs_path,obs_variable,date)))>=1]  
-        if len(obs_file) < 1: return None
+        if len(obs_file) < 2: return None
         for h,fore_hour in enumerate(self.forecast_hours):
             if fore_hour <= 24:
                 obs_data = Dataset(obs_file[0])
@@ -179,4 +172,5 @@ class GridOutput(object):
         data = np.array(data)
         data[data < 0] = 0
         data[data > 150] = 150
-        return data
+        if len(data) < 1: return None
+        else: return data

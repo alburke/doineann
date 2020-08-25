@@ -41,7 +41,7 @@ def main():
         member_path = '{0}/{1}'.format(config.hf_path,member)
         if not os.path.exists(member_path): os.makedirs(member_path)
     
-    dlprocess = DLPreprocessing(config.ensemble_name,config.model_path,
+    dlprocess = DLPreprocessing(config.train,config.ensemble_name,config.model_path,
         config.hf_path,config.patch_radius,config.run_date_format,
         forecast_variables,config.storm_variables,config.potential_variables,
         config.start_hour,config.end_hour,config.mask)
@@ -50,18 +50,23 @@ def main():
     dlprocess.process_map_data(config.model_map_file)
 
     #Process obs and ensemble data with parallelization
-    pool = Pool(mp.cpu_count())
+    
     if args.obs or config.train is True:
+        pool = Pool(mp.cpu_count())
         for run_date in config.dates:
             pool.apply_async(dlprocess.process_observational_data,
             (run_date,config.mrms_variable,config.mrms_path))
-    elif not args.obs:
+        pool.close()
+        pool.join()
+    
+    if not args.obs:
+        pool = Pool(mp.cpu_count())
         for run_date in config.dates:
             for member in config.ensemble_members:
                 pool.apply_async(dlprocess.process_ensemble_member,
                 (run_date,member,config.hf_path,config.model_map_file))
-    pool.close()
-    pool.join()
+        pool.close()
+        pool.join()
     
     return
 
