@@ -63,50 +63,102 @@ class GridOutput(object):
         Returns:
             Array of data loaded from files in (time, y, x) dimensions, Units
         """
+        
+        
+        u_v_variables = ['U component of wind','V component of wind','10 metre U wind component',
+                        '10 metre V wind component','u','v','10u','10v']
+
         filenames = self.find_data_files(model_path)
         #Open each file for reading.
         if len(filenames) <1: 
             print("No {0} model runs on {1}".format(self.member,self.run_date))
             units = None
             return data
+        
         for f, g_file in enumerate(filenames):
+            
+            grib = pygrib.open(g_file)
+            
             if type(model_variable) is int:
-                grib = pygrib.open(file)
                 data_values = grib[model_variable].values
+                print(grib[model_variable])
                 if grib[model_variable].units == 'unknown':
                     Id = grib[model_variable].parameterNumber
-                    units = self.unknown_units[Id] 
-                else:
-                    units = grib[model_variable].units
-                grib.close()
+            
             elif type(model_variable) is str:
                 if '_' in model_variable:
+                    #Multiple levels
                     variable = model_variable.split('_')[0]
                     level = model_variable.split('_')[1]
-                    if variable in self.unknown_names.values():
-                        Id, units = self.format_grib_name(variable)
-                        grib = pygrib.index(g_file,'parameterNumber','level' )
-                        data_values = grib.select(parameterNumber=Id, level=int(level))[0].values
-                        grib.close()
-                    else:
-                        
-                        grib = pygrib.index(g_file,'name','level')
-                        data_values = grib.select(name=variable, level=int(level))[0].values
-                        grib.close()
-                else:   
-                    if model_variable in self.unknown_names.values():
-                        Id, units = self.format_grib_name(model_variable)
-                        grib = pygrib.index(g_file,'parameterNumber')
-                        data_values = grib.select(parameterNumber=Id)[0].values
-                        grib.close()
-                    else:
-                        grib = pygrib.index(g_file,'name')
-                        if len(grib.select(name=model_variable)) > 1:
-                            raise NameError("Multiple '{0}' records found. Rename with level:'{0}_level'".format(model_variable))
-                        else:
-                            data_values = grib.select(name=model_variable)[0].values
-                            units = grib.select(name=model_variable)[0].units
-                        grib.close()
+                else:
+                    #Only single level 
+                    variable=model_variable
+                    level=None
+                
+                message_keys = np.array([[message.name,message.shortName,
+                    message.level,message.typeOfLevel] for message in grib])
+                
+                ##################################
+                # U/V wind string variables
+                ##################################
+                
+                if variable in u_v_variables:
+                    u_v_ind = np.where(
+                        (message_keys[:,0] == variable) | (message_keys[:,1] == variable) &
+                        (message_keys[:,2] == level) | (message_keys[:,3] == level))[0]
+                    #Grib messages begin at one
+                    grib_u_v_ind = int(u_v_ind[0]+1)
+                    u_v_grib_data = grib[grib_u_v_ind].values
+                
+                ##################################
+                # Unknown string variables
+                ##################################
+
+                elif variable in self.unknown_names.values(): 
+                    Id, units = self.format_grib_name(variable)
+                    if level is None: grib_data = pygrib.index(g_file,'parameterNumber')(parameterNumber=Id)
+                    elif level in message_keys[:,2]: grib_data = pygrib.index(g_file,
+                        'parameterNumber','level')(parameterNumber=Id,level=level)
+                    elif level in message_keys[:,3]: grib_data = pygrib.index(g_file,
+                        'parameterNumber','typeofLevel')(parameterNumber=Id,typeOfLevel=level)
+                    else: 
+                        print('No {0} {1} grib message found for {2} {3}'.format(
+                        self.run_date,self.member,variable,level))
+                        continue
+                
+                ##################################
+                # Known string variables
+                ##################################
+
+                elif variable in message_keys[:,0]:
+                    if level is None: grib_data = pygrib.index(g_file,'name')(name=variable)
+                    elif level in message_keys[:,2]: grib_data = pygrib.index(g_file,
+                        'name','level')(name=variable,level=level)
+                    elif level in message_keys[:,3]: grib_data = pygrib.index(g_file,
+                        'name','typeOfLevel')(name=variable, typeOfLevel=level)
+                    else: 
+                        print('No {0} {1} grib message found for {2} {3}'.format(
+                        self.run_date,self.member,variable,level))
+                        continue
+                    
+                elif variable in message_keys[:,1]:
+                    if level is None: grib_data = pygrib.index(g_file,'shortName')(shortName=variable)
+                    elif level in message_keys[:,2]: grib_data = pygrib.index(g_file,
+                        'shortName','level')(shortName=variable,level=level)
+                    elif level in message_keys[:,3]: grib_data = pygrib.index(g_file,
+                        'shortName','typeOfLevel')(shortName=variable,typeOfLevel=level)
+                    else: 
+                        print('No {0} {1} grib message found for {2} {3}'.format(
+                        self.run_date,self.member,variable,level))
+                        continue
+                
+            if variable in u_v_variables: data_values = u_v_grib_data
+            elif len(grib_data) > 1: raise NameError(
+                "Multiple '{0}' records found for {1} {2}.\n Please rename with more description'".format(
+                model_variable,self.run_date,self.member))
+            else: data_values = grib_data[0].values
+        
+            grib.close()
             if data is None:
                 data = np.empty((len(self.valid_dates), data_values.shape[0], data_values.shape[1]), dtype=float)
                 data[f]=data_values[:]
