@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from util.make_proj_grids import make_proj_grids, read_ncar_map_file
+from processing.DLDataEngineering  import DLDataEngineering
 from sklearn.preprocessing import OneHotEncoder
 from processing.DLModeler import DLModeler
 from tensorflow.keras import models
@@ -41,41 +42,43 @@ def main():
     config.forecast_variables = config.storm_variables + config.potential_variables
     if hasattr(config, "tendency_variables"):
         config.forecast_variables.extend(config.tendency_variables)
+    #Shorten variable names
+    long_forecast_variables = []
+    for variable in config.forecast_variables:
+        if "_" in variable and " " not in variable:
+            variable_name= variable.split('_')[0].upper() + variable.split('_')[-1]
+        elif "_" in variable:
+            variable_name= ''.join([v[0].upper() for v in variable.split()]) + variable.split('_')[-1]
+        elif " " in variable: variable_name= ''.join([v[0].upper() for v in variable.split()])
+        else:variable_name = variable
+        long_forecast_variables.append(variable_name)
+    var_names = np.array(long_forecast_variables)
     
-    #Process data for different processor arguments
-    dlmodel = DLModeler(config.model_path,config.hf_path,
-        config.start_dates,config.end_dates,config.num_examples,
-        config.class_percentages,config.patch_radius,
-        config.run_date_format,config.forecast_variables)
-
+    #Class to read data and standardize
+    dldataeng = DLDataEngineering(config.model_path,config.hf_path,config.start_dates,
+        config.end_dates,config.num_examples,config.class_percentages,
+        config.patch_radius,config.run_date_format,var_names)
+    #Class to train and predict on the data
+    dlmodel = DLModeler(config.model_path,
+        config.start_dates,config.end_dates,var_names,
+        config.num_examples,config.class_percentages)
+    
     if args.train:
         for member in config.ensemble_members:
-            train_models(config,dlmodel,member)
+            train_models(config,dlmodel,dldataeng,member)
     elif args.fore:
-        print('\nCreating cKDtree to map patches onto the total grid') 
-        #Open mapfile over total domain
-        proj_dict, grid_dict = read_ncar_map_file(config.model_map_file)
-        mapping_data = make_proj_grids(proj_dict, grid_dict)
-        
-        #Create cKDtree to convert patch grid points to the total domain
-        tree = cKDTree(np.c_[mapping_data['lon'].ravel(),mapping_data['lat'].ravel()])
-
-        #Open mapfile over subset domain (CONUS)
-        subset_map_file = glob(config.hf_path+'/*map*.h5')[0] 
-        subset_data = h5py.File(subset_map_file, 'r')['data']
-        #Convert subset grid points to total grid using cKDtree
-        _,inds = tree.query(np.c_[subset_data[0].ravel(),
-                        subset_data[1].ravel()])
-    
+        subset_map_data, map_conversion_inds = forecast_map_info()        
         forecast_dates = pd.date_range(start=config.start_dates['forecast'],
             end=config.end_dates['forecast'],freq='1D').strftime(config.run_date_format)
         for date in forecast_dates:
             for member in config.ensemble_members:
-                gridded_data = predict_models(config,dlmodel,member,date,subset_data,mapping_data,inds)
-                gridded_output(config,member,date,gridded_data) 
+                print('\nPredicting {0} {1} data'.format(member,date))
+                dlmodel.predict_model(member,subset_map_data,total_map_data,
+                    date,dldataeng,config.patch_radius,
+                    map_conversion_inds,config.forecast_grid_path)
     return
 
-def train_models(config,dlmodel,member):
+def train_models(config,dlmodel,dldataeng,member):
     """
     Function that reads and extracts pre-processed 2d member data 
     from an ensemble to train a convolutional neural net (cnn). 
@@ -87,107 +90,30 @@ def train_models(config,dlmodel,member):
         dlmodel (object): class object for creating/processing data for a cnn
         member (str): ensemble member data that trains a cnn
     """
-    train_data, train_label = dlmodel.preprocess_training_data(member)
-    valid_data, valid_label = dlmodel.preprocess_validation_data(member)
+    train_data, train_label = dldataeng.extract_training_data(member)
+    valid_data, valid_label =  None,None #= dldataeng.extract_validation_data(member)
     
-    '''
     onehot_encoder = OneHotEncoder(sparse=False,categories='auto')
-    if train_data is not None and valid_data is not None:
+    if train_data is not None:# and valid_data is not None:
         #Train and save models predicting severe hail or no hail
         train_obs_label = onehot_encoder.fit_transform(train_label.reshape(-1, 1))
         dlmodel.train_CNN(member,train_data,train_obs_label,valid_data,valid_label)
-    '''
     return 
 
-
-def predict_models(config,dlmodel,member,date,subset_data,mapping_data,inds):
-    """
-    Function that opens a pre-trained convolutional neural net (cnn). 
-    and predicts hail probability forecasts for a single ensemble member.
-    
-    Args:
-        config (object): configuration object 
-        dlmodel (object): class object for creating/processing data for a cnn
-        member (str): ensemble member data that trains a cnn
- 
-    """
-    #Read data on forecast days
-    print('\nPredicting {0} {1} data'.format(member,date))
-    forecast_data = dlmodel.read_files('forecast',member,date)
-    
-    #Extract forecast data (#hours, #patches, nx, ny, #variables)
-    if forecast_data is None: 
-        print('No forecast data found')
-        return
-    #Open CNN model 
-    cnn_model_file = config.model_path+'/{0}_{1}_{2}_{3}_CNN_model.h5'.format(
-            member,config.start_dates['train'].strftime('%Y%m%d'),
-            config.end_dates['train'].strftime('%Y%m%d'),config.num_examples)
-    #Load saved CNN model
-    cnn_model = models.load_model(cnn_model_file) 
-    ''' 
-    if member in ['nssl_12']:
-        prob_thresh = 0.18
-    elif member in ['arw_12']:
-        prob_thresh = 0.2
-    elif member in ['arw_00']:
-        prob_thresh = 0.165
-    elif member in ['nmmb_12']:
-        prob_thresh = 0.16
-    elif member in ['nam_00']:
-        prob_thresh = 0.17
-    else:
-        #Use minimum prob threshold chosen with validation data
-        threshold_model_file = config.model_path+'/{0}_{1}_{2}_{3}_CNN_model_threshold.h5'.format(
-            member,config.start_dates['train'].strftime('%Y%m%d'),
-            config.end_dates['train'].strftime('%Y%m%d'),config.num_examples)
-        if not os.path.exists(threshold_model_file):
-            print('No thresholds found')
-            return 
-        prob_thresholds = pd.read_csv(threshold_model_file)
-        prob_thresh =  prob_thresholds.loc[0,'size_threshold']
-    print(prob_thresh)    
-    '''
-    #Use minimum prob threshold chosen with validation data
-    threshold_model_file = config.model_path+'/{0}_{1}_{2}_{3}_CNN_model_threshold.h5'.format(
-            member,config.start_dates['train'].strftime('%Y%m%d'),
-            config.end_dates['train'].strftime('%Y%m%d'),config.num_examples)
-    if not os.path.exists(threshold_model_file):
-        print('No thresholds found')
-        return 
-    prob_thresholds = pd.read_csv(threshold_model_file)
-    prob_thresh =  prob_thresholds.loc[0,'size_threshold']+0.05
-    print(prob_thresh)    
-    #Produce hail forecast using standardized forecast data every hour
-    total_grid = np.zeros((2,forecast_data.shape[0],)+mapping_data['lat'].ravel().shape)
-    total_count = 0
-    for hour in np.arange(forecast_data.shape[0]):
-        sev_subset_patches = np.zeros_like(subset_data[0])
-        sig_subset_patches = np.zeros_like(subset_data[0])
-        standard_forecast_data = dlmodel.standardize_data(member,forecast_data[hour])
-        #Predict probability of severe hail
-        cnn_preds = cnn_model.predict(standard_forecast_data)
-        sev_prob_inds = np.where( (cnn_preds[:,2]+cnn_preds[:,3]) >= prob_thresh)[0]
-        if len(sev_prob_inds) >= 1: 
-            sev_subset_patches[sev_prob_inds] = np.full((config.patch_radius,config.patch_radius), 1)
-        total_grid[0,hour,inds] = sev_subset_patches.ravel()
-        total_grid[1,hour,inds] = sig_subset_patches.ravel()
-        total_count += len(sev_prob_inds)
-        print(hour,len(sev_prob_inds),np.nanmax((cnn_preds[:,2]+cnn_preds[:,3])))
-    print('Total severe probs:',total_count)
-    print()
-    return total_grid.reshape( (2,forecast_data.shape[0],)+mapping_data['lat'].shape)
-
-def gridded_output(config,member,date,gridded_data):
-    #Output gridded forecasts
-    date_outpath = config.forecast_grid_path + '{0}/'.format(date[:-5])
-    if not os.path.exists(date_outpath): os.makedirs(date_outpath)
-    gridded_out_file = date_outpath + '{0}_{1}_forecast_grid.h5'.format(member,date)
-    print('Writing out {0}'.format(gridded_out_file))
-    with h5py.File(gridded_out_file, 'w') as hf:
-        hf.create_dataset("data",data=gridded_data,
-        compression='gzip',compression_opts=6)
-    return
+def forecast_map_info(config):
+    print('\nCreating cKDtree to map patches onto the total grid') 
+    #Open mapfile over total domain
+    proj_dict, grid_dict = read_ncar_map_file(config.model_map_file)
+    mapping_data = make_proj_grids(proj_dict, grid_dict)
+    #Create cKDtree to convert patch grid points to the total domain
+    tree = cKDTree(np.c_[mapping_data['lon'].ravel(),mapping_data['lat'].ravel()])
+    #Open mapfile over subset domain (CONUS)
+    subset_map_file = glob(config.hf_path+'/*map*.h5')[0] 
+    subset_map_data = h5py.File(subset_map_file, 'r')['data']
+    #Convert subset grid points to total grid using cKDtree
+    _,map_conversion_inds = tree.query(np.c_[subset_data[0].ravel(),
+            subset_data[1].ravel()])
+    return subset_map_data,map_conversion_inds
 
 if __name__ == "__main__":
     __spec__ = None
