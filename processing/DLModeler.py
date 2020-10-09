@@ -57,7 +57,7 @@ class DLModeler(object):
             aug = ImageDataGenerator(
                     zca_whitening=True,
                     horizontal_flip=True, 
-                    vertical_flip=True
+                    vertical_flip=True,
                     width_shift_range=0.2,
                     height_shift_range=0.2,
                     fill_mode="nearest")
