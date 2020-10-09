@@ -38,7 +38,7 @@ if __name__ == "__main__":
           long_description=pkg_description,
           license="MIT",
           url="https://github.com/alburke/doineann",
-          packages=["util","processing"],
+          packages=["doineann","doineann.util","doineann.processing"],
           scripts=["bin/dndata", "bin/dnforecast", "bin/dnfileoutput"],
             #,"bin/dncalibration" 
           data_files=[("mapfiles", ["mapfiles/hrefv2_2018_map.txt"])],

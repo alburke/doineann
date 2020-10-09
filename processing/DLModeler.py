@@ -15,6 +15,7 @@ import multiprocessing as mp
 #Deep learning packages
 import tensorflow as tf
 from tensorflow.keras import layers,regularizers,models
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 import matplotlib.pyplot as plt
 
@@ -52,6 +53,16 @@ class DLModeler(object):
             member,self.start_dates['train'].strftime('%Y%m%d'),
             self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
         if not exists(model_file):
+            
+            aug = ImageDataGenerator(
+                    zca_whitening=True,
+                    horizontal_flip=True, 
+                    vertical_flip=True
+                    width_shift_range=0.2,
+                    height_shift_range=0.2,
+                    fill_mode="nearest")
+
+            
             #Initiliaze Convolutional Neural Net (CNN)
             model = models.Sequential()
             #First layer, input shape (y,x,# variables) 
@@ -87,9 +98,11 @@ class DLModeler(object):
             print(model.summary())
             #Fit neural net
             n_epochs = 40
-            conv_hist = model.fit(model_data,model_labels,
-                epochs=n_epochs,batch_size=512,verbose=1,
-                class_weight=self.class_percentages)
+            bs = 512
+
+            conv_hist = model.fit(
+            x = aug.flow(model_data,model_labels,batch_size=bs),
+            epochs=n_epochs,verbose=1,class_weight=self.class_percentages)
             #Save trained model
             model.save(model_file)
             print('Writing out {0}'.format(model_file))

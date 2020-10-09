@@ -30,7 +30,7 @@ class DLPreprocessing(object):
         return
 
     def process_map_data(self,map_file):
-        lon_lat_file = '{0}/{1}_map_data.h5'.format(self.hf_path,self.ensemble_name)
+        lon_lat_file = f'{self.hf_path}/{self.ensemble_name}_map_data.h5'
         if not os.path.exists(lon_lat_file):
             proj_dict, grid_dict = read_ncar_map_file(map_file)
             mapping_data = make_proj_grids(proj_dict, grid_dict)
@@ -43,7 +43,7 @@ class DLPreprocessing(object):
             lon_slices = self.slice_into_patches(mapping_lon_data,self.patch_radius,self.patch_radius)
             lat_slices = self.slice_into_patches(mapping_lat_data,self.patch_radius,self.patch_radius)
             lon_lat_data = np.array((lon_slices,lat_slices))
-            print('\nWriting map file: {0}\n'.format(lon_lat_file))
+            print(f'\nWriting map file: {lon_lat_file}\n')
             with h5py.File(lon_lat_file, 'w') as hf:
                 hf.create_dataset("data",data=lon_lat_data,
                 compression='gzip',compression_opts=6)
