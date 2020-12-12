@@ -40,8 +40,11 @@ class DLPreprocessing(object):
             else:
                 mapping_lat_data = mapping_data['lat']
                 mapping_lon_data = mapping_data['lon']
-            lon_slices = self.slice_into_patches(mapping_lon_data,self.patch_radius,self.patch_radius)
-            lat_slices = self.slice_into_patches(mapping_lat_data,self.patch_radius,self.patch_radius)
+            #lon_slices = self.cnn_slice_into_patches(mapping_lon_data,self.patch_radius,self.patch_radius)
+            #lat_slices = self.cnn_slice_into_patches(mapping_lat_data,self.patch_radius,self.patch_radius)
+            
+            lon_slices = self.unet_slice_into_patches(mapping_lon_data,self.patch_radius,self.patch_radius)
+            lat_slices = self.unet_slice_into_patches(mapping_lat_data,self.patch_radius,self.patch_radius)
             lon_lat_data = np.array((lon_slices,lat_slices))
             print(f'\nWriting map file: {lon_lat_file}\n')
             with h5py.File(lon_lat_file, 'w') as hf:
@@ -69,6 +72,7 @@ class DLPreprocessing(object):
         #Create gridded mrms object 
         gridded_obj = GridOutput(run_date,start_date,end_date)
         gridded_obs_data = gridded_obj.load_obs_data(mrms_variable,mrms_path)
+
         if gridded_obs_data is None: 
             print('No observations on {0}'.format(start_date))
             return
@@ -76,15 +80,14 @@ class DLPreprocessing(object):
             #Slice mrms data 
             if self.mask is not None: hourly_obs_data = gridded_obs_data[hour]*self.mask
             else: hourly_obs_data = gridded_obs_data[hour]
-            hourly_obs_patches = self.slice_into_patches(hourly_obs_data,self.patch_radius,self.patch_radius)
-            
-            #Label mrms data
-            labels = self.label_obs_patches(hourly_obs_patches)
-            obs_patch_labels.append(labels)
-        if np.nanmax(obs_patch_labels) == 0: return 
-        
-        obs_filename = '{0}/obs/obs_{1}.h5'.format(self.hf_path,run_date.strftime(self.run_date_format)) 
-        print('Writing obs file: {0}'.format(obs_filename))
+            hourly_obs_patches = self.unet_slice_into_patches(hourly_obs_data,self.patch_radius,self.patch_radius)
+            #Label cnn mrms data
+            #labels = self.unet_label_obs_patches(hourly_obs_patches)
+            obs_patch_labels.append(hourly_obs_patches)
+
+        if np.nanmax(obs_patch_labels) <= 0: return 
+        obs_filename=f'{self.hf_path}/obs/obs_{run_date.strftime(self.run_date_format)}.h5'
+        print(f'Writing obs file: {obs_filename}')
         #Write file out using Hierarchical Data Format 5 (HDF5) format. 
         with h5py.File(obs_filename, 'w') as hf:
             hf.create_dataset("data",data=obs_patch_labels,
@@ -108,38 +111,38 @@ class DLPreprocessing(object):
         gridded_obj = GridOutput(run_date,start_date,end_date,member)
         print("Starting ens processing", member, run_date)
         #Slice each member variable separately over each hour
+        gridded_variable_data = gridded_obj.load_model_data(self.model_path,forecast_variables)
+        if gridded_variable_data is None: return
         for v,variable in enumerate(self.forecast_variables):
-            gridded_variable_data = gridded_obj.load_model_data(variable,self.model_path)
-            if gridded_variable_data is None: break 
-            hourly_var_patches = [] 
+            hourly_patches = [] 
             #Slice hourly data
-            for hour in np.arange(1,len(gridded_variable_data)):
+            for hour in np.arange(1,gridded_variable_data.shape[0]):
                 #Storm variables are sliced at the current forecast hour
-                if variable in self.storm_variables:var_hour = hour
+                #if variable in self.storm_variables:var_hour = hour
                 #Potential (environmental) variables are sliced at the previous forecast hour
-                elif variable in self.potential_variables:var_hour = hour-1
-                if self.mask is not None:masked_gridded_variable = gridded_variable_data[var_hour]*self.mask
-                else:masked_gridded_variable = gridded_variable_data[var_hour]
-                patches = self.slice_into_patches(masked_gridded_variable,self.patch_radius,self.patch_radius)
-                hourly_var_patches.append(patches)
+                #elif variable in self.potential_variables: var_hour = hour-1
+                if self.mask is not None: masked_gridded_variable = gridded_variable_data[hour,v,:,:]*self.mask
+                else: masked_gridded_variable = gridded_variable_data[hour,v,:,:]
+                #patches = self.cnn_slice_into_patches(masked_gridded_variable,self.patch_radius,self.patch_radius)
+                patches = self.unet_slice_into_patches(masked_gridded_variable,self.patch_radius,self.patch_radius)
+                hourly_patches.append(patches)
+                #del masked_gridded_variable
             #Shorten variable names
             if "_" in variable: 
-                variable_name= ''.join([v[0].upper() for v in variable.split()]) + variable.split('_')[-1]
+                variable_name=variable.split('_')[0].upper() + variable.split('_')[-1]
             elif " " in variable: 
                 variable_name= ''.join([v[0].upper() for v in variable.split()])
-            else:variable_name = variable
+            else: variable_name = variable
             var_filename = '{0}/{2}/{1}_{2}_{3}.h5'.format(member_path,
                 variable_name,member,run_date.strftime(self.run_date_format)) 
-            print('Writing model file: {0}'.format(var_filename))
+            print(f'Writing model file: {var_filename}')
             #Write file out using Hierarchical Data Format 5 (HDF5) format. 
             with h5py.File(var_filename, 'w') as hf:
-                hf.create_dataset("data",data=np.array(hourly_var_patches),
+                hf.create_dataset("data",data=np.array(hourly_patches),
                 compression='gzip',compression_opts=6)
-        
-             
         return
 
-    def slice_into_patches(self,data2d, patch_ny, patch_nx):
+    def cnn_slice_into_patches(self,data2d, patch_ny, patch_nx):
         '''
         A function to slice a 2-dimensional [ny, nx] array into rectangular patches and return 
         the sliced data in an array of shape [npatches, nx_patch, ny_patch].
@@ -175,9 +178,41 @@ class DLPreprocessing(object):
                     continue
                 sliced_data.append(data)
         return np.array(sliced_data)
+    
+    def unet_slice_into_patches(self,data2d,patch_ny,patch_nx,overlap_points=16):
+        '''
+        A function to slice a 2-dimensional [ny, nx] array into rectangular patches and return 
+        the sliced data in an array of shape [npatches, nx_patch, ny_patch].
+      
+        If the array does not divide evenly into patches, excess points from the northern and 
+        eastern edges of the array will be trimmed away (incomplete patches are not included
+        in the array returned by this function).
+
+        Input variables:   
+                    data2d -- the data you want sliced.  Must be a 2D (nx, ny) array
+                    ny_patch -- the number of points in the patch (y-dimension)
+                    nx_patch -- the number of points in the patch (x-dimension)
+        '''
+        #Determine the step needed for overlaping tiles
+        nstep_y = patch_ny-overlap_points
+        nstep_x = patch_nx-overlap_points
+        
+        #Define array to store sliced data 
+        sliced_data = [] 
+        
+        for i in np.arange(0,data2d.shape[0],nstep_x): 
+            next_i = i+patch_nx
+            if next_i > data2d.shape[0]:break 
+            for j in np.arange(0,data2d.shape[1],nstep_y):
+                next_j = j+patch_ny
+                if next_j > data2d.shape[1]: break
+                data = data2d[i:next_i,j:next_j]
+                if any(np.isnan(data.flatten())) == True: continue
+                sliced_data.append(data)
+        return np.array(sliced_data)
 
 
-    def label_obs_patches(self,obs_patches,label_thresholds=[5,25,50]):
+    def cnn_label_obs_patches(self,obs_patches,label_thresholds=[5,25,50]):
         '''
         A function to generate labels for MESH patch data.  Labels can be defined by passing in a list of
         thresholds on which to divide the categories.  If not provided, default label thresholds of 5, 25, 
@@ -209,6 +244,19 @@ class DLPreprocessing(object):
             obs_labels.append(label)
         return obs_labels
     
+    """
+    def unet_label_obs_patches(self,obs_patches):
+        '''
+        See cnn_label_obs_patches documentation
+        '''
+        for o,obs_patch in enumerate(obs_patches):
+            obs_patches[o][(obs_patch >= 0) & (obs_patch < 5)] = 0
+            obs_patches[o][(obs_patch >= 5) & (obs_patch < 25)] = 1
+            obs_patches[o][(obs_patch >= 25) & (obs_patch < 50)] = 2
+            obs_patches[o][(obs_patch >= 50)] = 3
+        return obs_patches
+    """
+
     def select_training_data(self,member,training_filename):
         """
         Function to select random patches to train a CNN. Observation files

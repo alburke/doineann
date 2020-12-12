@@ -1,21 +1,15 @@
 from util.make_proj_grids import make_proj_grids, read_ncar_map_file
-from sklearn.utils import shuffle
 from os.path import exists
-from glob import glob
 import pandas as pd
 import numpy as np
-import random
-random.seed(42)
 import h5py
-
-#Parallelization packages
-from multiprocessing import Pool
-import multiprocessing as mp
         
 #Deep learning packages
 import tensorflow as tf
 from tensorflow.keras import layers,regularizers,models
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from sklearn.metrics import f1_score,roc_auc_score
+
 
 import matplotlib.pyplot as plt
 
@@ -30,66 +24,73 @@ class DLModeler(object):
         self.var_name = var_name
         self.num_examples = num_examples
         self.class_percentages = class_percentages
+    
+    
+        self.model_args = '{0}_{1}_{2}'.format(
+            self.start_dates,self.end_dates,self.num_examples)
         return
 
-    def train_CNN(self,member,model_data,model_labels,valid_data,valid_labels):
+    def train_CNN(self,member,input_data): 
         """
         Function to train a convolutional neural net (CNN) for random 
         training data and associated labels.
 
         Args:
             member (str): Ensemble member 
-            model_data (ndarray): ensemble member data
-            model_labels (ndarray): observation labels
-
+            trainX (tuple): Tuple of (train data, train labels, 
+                validation data, validation labels) 
         """
-        print('\nTraining {0} models'.format(member))
-        print('Training data shape {0}'.format(np.shape(model_data)))
-        print('Training label data shape {0}\n'.format(np.shape(model_labels)))
-        #print('Validation data shape {0}'.format(np.shape(valid_data)))
-        #print('Validation label data shape {0}\n'.format(np.shape(valid_labels)))
+        trainX,trainY,validX,validY = input_data
         
-        model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model.h5'.format(
-            member,self.start_dates['train'].strftime('%Y%m%d'),
-            self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
+        print('\nTraining {0} models'.format(member))
+        print('Training data shape {0}'.format(np.shape(trainX)))
+        print('Training label data shape {0}\n'.format(np.shape(trainY)))
+        print('Validation data shape {0}'.format(np.shape(validX)))
+        print('Validation label data shape {0}\n'.format(np.shape(validY)))
+        
+        
+        model_file = self.model_path + f'/{member}_{self.model_args}_CNN_model.h5'
+        print(model_file)
         if not exists(model_file):
+            # Clear graphs
+            tf.keras.backend.clear_session()
             
+            #Augment data
             aug = ImageDataGenerator(
-                    zca_whitening=True,
-                    horizontal_flip=True, 
-                    vertical_flip=True,
-                    width_shift_range=0.2,
-                    height_shift_range=0.2,
-                    fill_mode="nearest")
-
+                rotation_range=10,zoom_range=0.15,
+                width_shift_range=0.2,height_shift_range=0.2,
+                fill_mode="nearest")
             
             #Initiliaze Convolutional Neural Net (CNN)
             model = models.Sequential()
-            #First layer, input shape (y,x,# variables) 
-            input_shape = np.shape(model_data[0])
-            model.add(layers.GaussianNoise(0.1, input_shape=(input_shape)))
+            input_shape = np.shape(trainX[0])
+            
+            #First layer: input shape (y,x,# variables) 
+            #Add noise
+            model.add(layers.GaussianNoise(0.01, input_shape=(input_shape)))
+            model.add(layers.Conv2D(32, (3,3),padding='same'))
             model.add(layers.Conv2D(32, (3,3),padding='same'))
             model.add(layers.BatchNormalization())
             model.add(layers.LeakyReLU(alpha=0.3))
             model.add(layers.MaxPooling2D())
+            
             #Second layer
+            model.add(layers.Conv2D(64, (3,3),padding='same'))
             model.add(layers.Conv2D(64, (3,3),padding='same'))
             model.add(layers.BatchNormalization())
             model.add(layers.LeakyReLU(alpha=0.3))
-            #model.add(layers.Activation("relu"))
             model.add(layers.MaxPooling2D())
-        
+            
             #Third layer
+            model.add(layers.Conv2D(128, (3,3),padding='same'))
             model.add(layers.Conv2D(128, (3,3),padding='same'))
             model.add(layers.BatchNormalization())
             model.add(layers.LeakyReLU(alpha=0.3))
-            #model.add(layers.Activation("relu"))
             model.add(layers.MaxPooling2D())
             
-            #Flatten the last convolutional layer into a long feature vector
+            #Flatten the last convolutional layer 
             model.add(layers.Flatten())
-            #model.add(layers.Dropout(0.10))
-            model.add(layers.Dense(512))
+            model.add(layers.Dense(256))
             model.add(layers.LeakyReLU(alpha=0.3))
             model.add(layers.Dense(4,activation='softmax'))
             #Compile neural net
@@ -97,52 +98,57 @@ class DLModeler(object):
                 metrics=[tf.keras.metrics.AUC()])
             print(model.summary())
             #Fit neural net
-            n_epochs = 40
-            bs = 512
+            n_epochs = 10
+            bs = 256
 
+            train_generator = aug.flow(trainX,trainY,batch_size=bs)
             conv_hist = model.fit(
-            x = aug.flow(model_data,model_labels,batch_size=bs),
-            epochs=n_epochs,verbose=1,class_weight=self.class_percentages)
+                train_generator,steps_per_epoch=len(trainX) // bs,
+                epochs=n_epochs,verbose=1,class_weight=self.class_percentages)
             #Save trained model
             model.save(model_file)
-            print('Writing out {0}'.format(model_file))
+            print(f'Writing out {model_file}')
         else:
-            print('Opening {0}'.format(model_file))
             model = models.load_model(model_file)
+            print(f'\nOpening {model_file}\n')
 
-        del model_labels,model_data
+        del trainY,trainX
         
-        '''
-        #Find the threshold with the highest AUC score 
-        #on validation data
-        threshold_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model_threshold.h5'.format(
-            member,self.start_dates['train'].strftime('%Y%m%d'),
-            self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
-        
+        threshold_file = self.model_path + f'/{member}_{self.model_args}_CNN_model_threshold.h5'
         if exists(threshold_file): 
-            del valid_data,valid_labels
+            del validX,validY
             return
+        
+        self.validate_CNN(model,validX,validY,threshold_file)
+        return 
 
-        cnn_preds = model.predict(valid_data)
-        del valid_data
+    def validate_CNN(self,model,validX,validY,threshold_file): 
+        print()
+        #Predict on validation data
+        cnn_preds = model.predict(validX)
         sev_hail = cnn_preds[:,2]
         sig_hail = cnn_preds[:,3]
+        #combine the severe hail and sig severe hail classes
         sev_prob_preds = sev_hail+sig_hail
-        print(np.nanmax(sev_prob_preds))
-        df_best_score = pd.DataFrame(np.zeros((1, 1)),columns=['size_threshold'])
-        thresholds = np.arange(0.01,0.97,0.01)
-        true_preds = np.where(valid_labels >= 2, 1, 0)
-        del valid_labels
-        for prob_thresh in thresholds:
-            threshold_preds = np.where(sev_prob_preds >= prob_thresh,1,0)
-            print(np.count_nonzero(threshold_preds))
-            if np.count_nonzero(threshold_preds) <= 50:
-                df_best_score.loc[0,'size_threshold'] = prob_thresh
-                break
+        print('Max probability',np.nanmax(sev_prob_preds))
+        #classify labels as severe hail or no hail
+        true_preds = np.where(validY >= 2, 1, 0)
+        del validX, validY
+        
+        df_best_score = pd.DataFrame(np.zeros((1,1)),columns=['Size Threshold'])
+        #Find threshold with the highest validation AUC score 
+        auc_score = []
+        thresholds = np.arange(0.1,1.01,0.02)
+        for t in thresholds:
+            threshold_preds = np.where(sev_prob_preds >= t,1,0)
+            auc_score.append(roc_auc_score(true_preds, threshold_preds))
+        
+        print(auc_score)
+        #output threshold with highest AUC 
+        df_best_score['Size Threshold'] = thresholds[np.argmax(auc_score)]
         print(df_best_score)
-        print('Writing out {0}'.format(threshold_file))
         df_best_score.to_csv(threshold_file)
-        '''
+        print(f'Writing out {threshold_file}')
         return 
                 
     
@@ -163,15 +169,12 @@ class DLModeler(object):
             print('No forecast data found')
             return
         
-        cnn_model_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model.h5'.format(
-            member,self.start_dates['train'].strftime('%Y%m%d'),
-            self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
+        tf.keras.backend.clear_session()
+        cnn_model_file = self.model_args+f'{member}_CNN_model.h5'
         cnn_model = models.load_model(model_file) 
         
         #Use minimum prob threshold chosen with validation data
-        threshold_file = self.model_path+'/{0}_{1}_{2}_{3}_CNN_model_threshold.h5'.format(
-            member,self.start_dates['train'].strftime('%Y%m%d'),
-            self.end_dates['train'].strftime('%Y%m%d'),self.num_examples)
+        threshold_file = self.model_path + f'/{member}_{self.model_args}_CNN_model_threshold.h5'
         if not os.path.exists(threshold_file):
             print('No thresholds found')
             return 
