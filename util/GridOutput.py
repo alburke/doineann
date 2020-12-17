@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 from datetime import timedelta 
-from netCDF4 import Dataset
 from glob import glob
 import pandas as pd
+import xarray as xr
 import numpy as np
 import pygrib
-
 
 '''
 Gagne II, D. J., A. McGovern, N. Snook, R. Sobash, J. Labriola, J. K. Williams, S. E. Haupt, and M. Xue, 2016: 
@@ -17,8 +16,6 @@ class GridOutput(object):
     def __init__(self,run_date,start_date,end_date,member=None):
         self.run_date = pd.to_datetime(str(run_date))
         self.member = member
-        self.valid_dates = pd.date_range(
-            start=start_date,end=end_date,freq='1H')
         self.unknown_names = {3: "LCDC", 4: "MCDC", 5: "HCDC", 6: "Convective available potential energy", 7: "Convective inhibition", 
                             197: "RETOP", 198: "MAXREF", 199: "MXUPHL", 200: "MNUPHL", 220: "MAXUVV", 
                             221: "MAXDVV", 222: "MAXUW", 223: "MAXVW"}
@@ -26,31 +23,30 @@ class GridOutput(object):
                             199: "m**2 s**-2", 200: "m**2 s**-2", 220: "m s**-1", 
                             221: "m s**-1", 222: "m s**-1", 223: "m s**-1"}
         self.forecast_hours = np.arange((start_date-run_date).total_seconds() / 3600,
-                                        (end_date-run_date).total_seconds() / 3600 + 1, dtype=int)      
+                                        (end_date-run_date).total_seconds() / 3600 , dtype=int)      
     
     def load_obs_data(self,obs_variable,obs_path):
         """
         Loads data files and stores the output in the data attribute.
         """
         data = []
-        next_date = (self.run_date+timedelta(days=1)).strftime("%Y%m%d") 
-        filename_args = "{0}/{1}/*{2}*.nc"
-        obs_file = [glob(filename_args.format(obs_path,obs_variable,date))[0] 
-                    for date in [self.run_date.strftime("%Y%m%d"),next_date]
-                    if len(glob(filename_args.format(obs_path,obs_variable,date)))>=1]  
-        if len(obs_file) < 2: return None
-        for h,fore_hour in enumerate(self.forecast_hours):
-            if fore_hour <= 24:
-                obs_data = Dataset(obs_file[0])
-                data.append(obs_data.variables[obs_variable][h])
-            else:
-                obs_data = Dataset(obs_file[1])
-                data.append(obs_data.variables[obs_variable][h%13])
-        data = np.array(data)
-        data[data < 0] = 0
-        data[data > 150] = 150
-        if len(data) < 1: return None
-        else: return data
+        day_after_date = (self.run_date+timedelta(days=1)).strftime("%Y%m%d") 
+        #We are forecasting for 1200 UTC to 1200 UTC, hence we need the 
+        # valid date and also the next day     
+        first_half_obs_file = glob(f'{obs_path}/{obs_variable}/*{self.run_date.strftime("%Y%m%d")}*.nc')
+        second_half_obs_file = glob(f"{obs_path}/{obs_variable}/*{day_after_date}*.nc")
+        
+        if len(first_half_obs_file) < 1 or len(second_half_obs_file) < 1: 
+            print(f'No obs data on {self.run_date.strftime("%Y%m%d")}')
+            return None
+        first_half_obs_data = xr.open_dataset(first_half_obs_file[0])[obs_variable][12:].values
+        second_half_obs_data = xr.open_dataset(second_half_obs_file[0])[obs_variable][:12].values
+        
+        obs_data = np.concatenate((first_half_obs_data, second_half_obs_data))
+        obs_data[obs_data < 0] = 0
+        obs_data[obs_data > 150] = 150
+        if obs_data.shape[0] < len(self.forecast_hours): return None
+        else: return obs_data
 
     def find_data_files(self,model_path):
         filenames = []
@@ -78,7 +74,7 @@ class GridOutput(object):
                 filenames.append(files[0])
         return filenames
     
-    def load_model_data(self,model_path,forecast_variables):
+    def load_model_data(self,model_path,predictors):
         """
         Loads data from grib2 file objects or list of grib2 file objects. 
         Handles specific grib2 variable names and grib2 message numbers.
@@ -93,8 +89,8 @@ class GridOutput(object):
 
         filenames = self.find_data_files(model_path)
         #Open each file for reading.
-        if len(filenames) <1: 
-            print("No {0} model runs on {1}".format(self.member,self.run_date))
+        if len(filenames) < len(self.forecast_hours): 
+            print("Less than 24 hours of {0} model runs on {1}".format(self.member,self.run_date))
             units = None
             return data
 
@@ -102,20 +98,19 @@ class GridOutput(object):
             grib = pygrib.open(g_file)
             message_keys = np.array([[message.name,message.shortName,
                         message.level,message.typeOfLevel] for message in grib])
-             
-            for v,model_variable in enumerate(forecast_variables):    
-                if type(model_variable) is int:
-                    data_values = grib[model_variable].values
-                    if grib[model_variable].units == 'unknown':
-                        Id = grib[model_variable].parameterNumber
-                elif type(model_variable) is str:
-                    if '_' in model_variable:
+            for p,predictor in enumerate(predictors):    
+                if type(predictor) is int:
+                    data_values = grib[predictor].values
+                    if grib[predictor].units == 'unknown':
+                        Id = grib[predictor].parameterNumber
+                elif type(predictor) is str:
+                    if '_' in predictor:
                         #Multiple levels
-                        variable = model_variable.split('_')[0]
-                        level = model_variable.split('_')[1]
+                        variable = predictor.split('_')[0]
+                        level = predictor.split('_')[1]
                     else:
                         #Only single level 
-                        variable=model_variable
+                        variable=predictor
                         level=None
                         
                     ##################################
@@ -128,61 +123,49 @@ class GridOutput(object):
                             (message_keys[:,2] == level) | (message_keys[:,3] == level))[0]
                         #Grib messages begin at one
                         grib_u_v_ind = int(u_v_ind[0]+1)
-                        u_v_grib_data = grib[grib_u_v_ind].values
+                        data_values = grib[grib_u_v_ind].values
+                        continue
+                    try:
+                        
+                        ##################################
+                        # Unknown string variables
+                        ##################################
+                        if variable in self.unknown_names.values(): 
+                            Id, units = self.format_grib_name(variable)
+                            var_data = pygrib.index(g_file,'parameterNumber')(parameterNumber=Id)
                     
-                    ##################################
-                    # Unknown string variables
-                    ##################################
-
-                    elif variable in self.unknown_names.values(): 
-                        Id, units = self.format_grib_name(variable)
-                        if level is None: grib_data = pygrib.index(g_file,'parameterNumber')(parameterNumber=Id)
-                        elif level in message_keys[:,2]: grib_data = pygrib.index(g_file,
-                            'parameterNumber','level')(parameterNumber=Id,level=level)
-                        elif level in message_keys[:,3]: grib_data = pygrib.index(g_file,
-                            'parameterNumber','typeofLevel')(parameterNumber=Id,typeOfLevel=level)
-                        else: 
-                            print('No {0} {1} grib message found for {2} {3}'.format(
-                            self.run_date,self.member,variable,level))
-                            continue
-                
-                    ##################################
-                    # Known string variables
-                    ##################################
-
-                    elif variable in message_keys[:,0]:
-                        if level is None: grib_data = pygrib.index(g_file,'name')(name=variable)
-                        elif level in message_keys[:,2]: grib_data = pygrib.index(g_file,
-                            'name','level')(name=variable,level=level)
-                        elif level in message_keys[:,3]: grib_data = pygrib.index(g_file,
-                            'name','typeOfLevel')(name=variable, typeOfLevel=level)
-                        else: 
-                            print('No {0} {1} grib message found for {2} {3}'.format(
-                            self.run_date,self.member,variable,level))
-                            continue
-                    elif variable in message_keys[:,1]:
-                        if level is None: grib_data = pygrib.index(g_file,'shortName')(shortName=variable)
-                        elif level in message_keys[:,2]: grib_data = pygrib.index(g_file,
-                            'shortName','level')(shortName=variable,level=level)
-                        elif level in message_keys[:,3]: grib_data = pygrib.index(g_file,
-                            'shortName','typeOfLevel')(shortName=variable,typeOfLevel=level)
-                        else: 
-                            print('No {0} {1} grib message found for {2} {3}'.format(
-                            self.run_date,self.member,variable,level))
-                            continue
-                if variable in u_v_variables: 
-                    data_values = u_v_grib_data
-                    del u_v_grib_data
-                elif len(grib_data) > 1: raise NameError(
-                    "Multiple '{0}' records found for {1} {2}.\n Please rename with more description'".format(
-                    model_variable,self.run_date,self.member))
-                else: 
-                    data_values = grib_data[0].values
-                    del grib_data
+                        ##################################
+                        # Known string variables
+                        ##################################
+                        
+                        elif variable in message_keys[:,0]:
+                            var_data = pygrib.index(g_file,'name')(name=variable)
+                    
+                        elif variable in message_keys[:,1]:
+                            var_data = pygrib.index(g_file,'shortName')(shortName=variable)
+                    except: 
+                        print('No {0} {1} grib message found for {2} {3}'.format(
+                        self.run_date,self.member,variable,level))
+                        continue
+                    
+                    if level is None: 
+                        if len(var_data) > 1: 
+                            raise NameError(
+                            'Multiple {0} {1} {2} records found. Rename with {2}_level.'.format(
+                            self.run_date,self.member,predictor))
+                        data_values = var_data[0].values
+                        continue
+                    for v in np.arange(len(var_data)): 
+                        if var_data[v].level == int(level): 
+                            data_values = var_data[v].values
+                            break
+                        elif var_data[v].typeOfLevel == level: 
+                            data_values = var_data[v].values
+                            break
                 if data is None:
-                    data = np.empty( (len(self.valid_dates),len(forecast_variables),
-                        data_values.shape[0], data_values.shape[1]), dtype=float )*np.nan
-                data[f,v,:,:]=data_values[:]
+                    data = np.empty( (len(self.forecast_hours),len(predictors),
+                        np.shape(data_values)[0], np.shape(data_values)[1]), dtype=float )*np.nan
+                data[f,p,:,:]=data_values
                 del data_values
             grib.close()
         return data

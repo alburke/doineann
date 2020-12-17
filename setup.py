@@ -19,10 +19,9 @@ else:
                 "pandas>=0.15",
                 "scipy",
                 "matplotlib>=1.5",
-                "netCDF4",
-                "pyproj",
+                "xarray",
                 "pygrib",
-                "keras",
+                "tensorflow",
                 "h5py",
                 "cartopy"
                 ]

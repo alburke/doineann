@@ -6,7 +6,7 @@ import h5py
         
 #Deep learning packages
 import tensorflow as tf
-from tensorflow.keras import layers,regularizers,models
+from tensorflow.keras import layers,models
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from sklearn.metrics import f1_score,roc_auc_score
 
@@ -30,6 +30,82 @@ class DLModeler(object):
             self.start_dates,self.end_dates,self.num_examples)
         return
 
+    def train_UNET(self,member,input_data):
+        
+        model_file = self.model_path + f'/{member}_{self.model_args}_UNET.h5'
+        print(model_file)
+        
+        if exists(model_file):
+            del input_data
+            model = models.load_model(model_file)
+            print(f'\nOpening {model_file}\n')
+            #self.validate_UNET(model,validX,validY,threshold_file)
+            return 
+
+
+        trainX,trainY,validX,validY = input_data
+        
+        print('\nTraining {0} models'.format(member))
+        print('Training data shape {0}'.format(np.shape(trainX)))
+        print('Training label data shape {0}\n'.format(np.shape(trainY)))
+        #print('Validation data shape {0}'.format(np.shape(validX)))
+        #print('Validation label data shape {0}\n'.format(np.shape(validY)))
+        
+        input_shape = np.shape(trainX[0])
+        filters = [16, 24, 32, 48, 64]
+
+        #First layer: input shape (y,x,# variables) 
+        inputs = layers.Input(input_shape)
+        x = inputs
+        # Add noise
+        x = layers.GaussianNoise(0.01)(x)
+        
+        #Downsampling blocks 
+        c1, p1 = down_block(x, filters[0]) #128 -> 64
+        c2, p2 = down_block(p1, filters[1]) #64 -> 32
+        c3, p3 = down_block(p2, filters[2]) #32 -> 16
+        c4, p4 = down_block(p3, filters[3]) #16 -> 8
+
+        #Bottleneck
+        bn = bottleneck(p4, filters[4])
+
+        #Upsampling blocks 
+        u1 = up_block(bn, c4, filters[3]) #8 -> 16
+        u2 = up_block(u1, c3, filters[2]) #16 -> 32
+        u3 = up_block(u2, c2, filters[1]) #32 -> 64
+        u4 = up_block(u3, c1, filters[0]) #64 -> 128
+        
+        #Output layer
+        outputs = layers.Conv2D(1, (1, 1), padding="same", activation="relu")(u4)
+        
+        #Compile UNET
+        unet = models.Model(inputs, outputs)
+        unet.compile(optimizer=tf.keras.optimizers.Adam(),loss='mse')
+        print(unet.summary())
+        
+        #Augment data
+        aug = ImageDataGenerator(
+                rotation_range=10,zoom_range=0.15,
+                width_shift_range=0.2,height_shift_range=0.2,
+                fill_mode="nearest")
+            
+        #Fit UNET
+        n_epochs = 10
+        bs = 10
+            
+        train_generator = aug.flow(trainX,trainY,batch_size=bs)
+        conv_hist = unet.fit(train_generator,epochs=n_epochs,verbose=1) 
+        #Save trained model
+        #model.save(model_file)
+        print(f'Writing out {model_file}')
+        
+        #Clear graphs
+        tf.keras.backend.clear_session()
+        
+        #self.validate_UNET(model,validX,validY,threshold_file)
+        return 
+    
+    
     def train_CNN(self,member,input_data): 
         """
         Function to train a convolutional neural net (CNN) for random 
@@ -55,12 +131,6 @@ class DLModeler(object):
             # Clear graphs
             tf.keras.backend.clear_session()
             
-            #Augment data
-            aug = ImageDataGenerator(
-                rotation_range=10,zoom_range=0.15,
-                width_shift_range=0.2,height_shift_range=0.2,
-                fill_mode="nearest")
-            
             #Initiliaze Convolutional Neural Net (CNN)
             model = models.Sequential()
             input_shape = np.shape(trainX[0])
@@ -68,25 +138,12 @@ class DLModeler(object):
             #First layer: input shape (y,x,# variables) 
             #Add noise
             model.add(layers.GaussianNoise(0.01, input_shape=(input_shape)))
-            model.add(layers.Conv2D(32, (3,3),padding='same'))
-            model.add(layers.Conv2D(32, (3,3),padding='same'))
-            model.add(layers.BatchNormalization())
-            model.add(layers.LeakyReLU(alpha=0.3))
-            model.add(layers.MaxPooling2D())
-            
-            #Second layer
-            model.add(layers.Conv2D(64, (3,3),padding='same'))
-            model.add(layers.Conv2D(64, (3,3),padding='same'))
-            model.add(layers.BatchNormalization())
-            model.add(layers.LeakyReLU(alpha=0.3))
-            model.add(layers.MaxPooling2D())
-            
-            #Third layer
-            model.add(layers.Conv2D(128, (3,3),padding='same'))
-            model.add(layers.Conv2D(128, (3,3),padding='same'))
-            model.add(layers.BatchNormalization())
-            model.add(layers.LeakyReLU(alpha=0.3))
-            model.add(layers.MaxPooling2D())
+            for filters in [32,64,128]:
+                model.add(layers.Conv2D(filters, (3,3),padding='same'))
+                model.add(layers.Conv2D(filters, (3,3),padding='same'))
+                model.add(layers.BatchNormalization())
+                model.add(layers.LeakyReLU(alpha=0.3))
+                model.add(layers.MaxPooling2D())
             
             #Flatten the last convolutional layer 
             model.add(layers.Flatten())
@@ -97,15 +154,21 @@ class DLModeler(object):
             model.compile(optimizer='adam',loss='categorical_crossentropy',
                 metrics=[tf.keras.metrics.AUC()])
             print(model.summary())
-            #Fit neural net
+            #fit neural net
             n_epochs = 10
             bs = 256
 
-            train_generator = aug.flow(trainX,trainY,batch_size=bs)
+            #augment data
+            aug = imagedatagenerator(
+                rotation_range=10,zoom_range=0.15,
+                width_shift_range=0.2,height_shift_range=0.2,
+                fill_mode="nearest")
+            
+            train_generator = aug.flow(trainx,trainy,batch_size=bs)
             conv_hist = model.fit(
-                train_generator,steps_per_epoch=len(trainX) // bs,
+                train_generator,steps_per_epoch=len(trainx) // bs,
                 epochs=n_epochs,verbose=1,class_weight=self.class_percentages)
-            #Save trained model
+            #save trained model
             model.save(model_file)
             print(f'Writing out {model_file}')
         else:
@@ -164,7 +227,7 @@ class DLModeler(object):
         """
         
         #Extract forecast data (#hours, #patches, nx, ny, #variables)
-        data = dldataeng.read_files('forecast',member,date)
+        data = dldataeng.read_files('forecast',member,date,[None],[None])
         if data is None: 
             print('No forecast data found')
             return
@@ -207,3 +270,38 @@ class DLModeler(object):
             data=total_grid.reshape((2,data.shape[0],)+total_map_data['lat'].shape),
             compression='gzip',compression_opts=6)
         return
+
+
+'''
+From: https://idiotdeveloper.com/unet-segmentation-in-tensorflow/
+''' 
+
+def down_block(x, filters, kernel_size=(3, 3)):
+    c = layers.Conv2D(filters, kernel_size, padding='same')(x)
+    c = layers.LeakyReLU(alpha=0.2)(c)
+    c = layers.BatchNormalization()(c)
+    c = layers.Conv2D(filters, kernel_size, padding='same')(c)
+    c = layers.LeakyReLU(alpha=0.2)(c)
+    c = layers.BatchNormalization()(c)
+    p = layers.MaxPooling2D((2,2))(c)
+    return c, p
+
+def up_block(x, skip, filters, kernel_size=(3, 3)):
+    up = layers.UpSampling2D(size=(2, 2), interpolation='bilinear')(x)
+    concat = layers.Concatenate()([up, skip])
+    c = layers.Conv2D(filters, kernel_size, padding='same')(concat)
+    c = layers.LeakyReLU(alpha=0.2)(c)
+    c = layers.BatchNormalization()(c)
+    c = layers.Conv2D(filters, kernel_size, padding='same')(c)
+    c = layers.LeakyReLU(alpha=0.2)(c)
+    c = layers.BatchNormalization()(c)
+    return c
+
+def bottleneck(x, filters, kernel_size=(3, 3)):
+    c = layers.Conv2D(filters, kernel_size, padding='same')(x)
+    c = layers.LeakyReLU(alpha=0.2)(c)
+    c = layers.BatchNormalization()(c)
+    c = layers.Conv2D(filters, kernel_size, padding='same')(c)
+    c = layers.LeakyReLU(alpha=0.2)(c)
+    c = layers.BatchNormalization()(c)
+    return c

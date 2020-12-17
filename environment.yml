@@ -1,0 +1,17 @@
+name: DLEnv
+channels:
+    - conda-forge
+    - defaults
+    - anaconda
+    - conda-forge/label/broken
+dependencies:
+    - python
+    - matplotlib
+    - xarray
+    - pandas
+    - scikit-learn
+    - cartopy
+    - pygrib 
+    - pip
+        - tensorflow
+        - netcdf4
