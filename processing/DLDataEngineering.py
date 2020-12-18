@@ -10,33 +10,25 @@ import random
 from multiprocessing import Pool
 import multiprocessing as mp
 
-#from imblearn.combine import SMOTEENN, SMOTETomek
-
 class DLDataEngineering(object):
-    def __init__(self,model_path,hf_path,start_dates,end_dates,
-        num_examples,class_category,patch_radius,run_date_format,
-        predictors):
+    def __init__(self,model_path,hf_path,
+        num_examples,class_category,predictors):
         
     
         self.model_path = model_path
         self.hf_path = hf_path
-        self.start_dates = start_dates
-        self.end_dates = end_dates
         self.num_examples = num_examples
         self.class_category = class_category
-        self.patch_radius = patch_radius
-        self.run_date_format = run_date_format
-        self.predictors = predictors 
    
         long_predictors = []
-        #Shorten variable names
-        for variable in predictors:
-            if "_" in variable: 
-                variable_name= variable.split('_')[0].upper() + variable.split('_')[-1]
-            elif " " in variable: 
-                variable_name= ''.join([v[0].upper() for v in variable.split()])
-            else:variable_name = variable
-            long_predictors.append(variable_name)
+        #Shorten predictor names
+        for predictor in predictors:
+            if "_" in predictor: 
+                predictor_name= predictor.split('_')[0].upper() + predictor.split('_')[-1]
+            elif " " in predictor: 
+                predictor_name= ''.join([v[0].upper() for v in predictor.split()])
+            else:predictor_name = predictor
+            long_predictors.append(predictor_name)
          
         self.predictors = np.array(long_predictors)
 
@@ -46,7 +38,7 @@ class DLDataEngineering(object):
     # Training data 
     ################################################
 
-    def extract_training_data(self,member):
+    def extract_training_data(self,member,train_dates,model_type):
         """
         Function that reads and extracts 2D sliced training data from 
         an ensemble member. 
@@ -58,33 +50,33 @@ class DLDataEngineering(object):
         """
         
         print()
-        mode = 'train'
+        #mode = 'train'
 
         #Training arguments
-        filename_args = self.model_path+\
-            '/{0}_{1}_{2}_{3}_'.format(member,self.start_dates[mode].strftime('%Y%m%d'),
-            self.end_dates[mode].strftime('%Y%m%d'),self.num_examples)
+        filename_args = self.model_path+'/{0}_{1}_{2}_{3}_'.format(
+            member,train_dates[0],train_dates[-1],self.num_examples)
 
         #Random patches for training
-        train_cases_file=filename_args+'training_cases.csv'
+        train_cases_file = filename_args+'training_cases.csv'
+        
         #Observations associated with random patches    
-        train_labels_file = self.model_path+\
-            '/{0}_{1}_{2}_training_obs.h5'.format(
-            self.start_dates[mode].strftime('%Y%m%d'),
-            self.end_dates[mode].strftime('%Y%m%d'),self.num_examples)
+        if model_type == 'CNN':
+            train_obs_file = filename_args+'training_obs.h5'
+        elif model_type == 'UNET':
+            train_obs_file = self.model_path+'/{0}_{1}_{2}_training_obs.h5'.format(
+                train_dates[0],train_dates[-1],self.num_examples)
+        
         #Standard ensemble member data associated with random patches
-        train_features_file = filename_args+'standard_training_features.h5'
+        train_predictor_file = filename_args+'standard_training_predictors.h5'
        
         #Opening training data files
-        if exists(train_labels_file) and exists(train_features_file):
+        if exists(train_obs_file) and exists(train_predictor_file):
             #Opening training files
-            with h5py.File(train_labels_file, 'r') as ohf: 
-                obs_label = ohf['data'][()]
-            print(f'Opening {train_labels_file}')
+            with h5py.File(train_obs_file,'r') as ohf: obs_data=ohf['data'][()]
+            print(f'Opening {train_obs_file}')
             
-            with h5py.File(train_features_file, 'r') as mhf: 
-                standard_member_feature = mhf['data'][()]
-            print(f'Opening {train_features_file}')
+            with h5py.File(train_predictor_file, 'r') as mhf: standard_data=mhf['data'][()]
+            print(f'Opening {train_predictor_file}')
             
         else:
             if exists(train_cases_file): 
@@ -92,40 +84,40 @@ class DLDataEngineering(object):
                 patches = pd.read_csv(train_cases_file,index_col=0)
             else:
                 #Selecting random patches for training
-                patches = self.training_data_selection(member,train_cases_file)
-             
+                patches = self.training_data_selection(member,train_dates,
+                train_cases_file,model_type)
+            
             #Extracting obs labels
-            obs_label = self.read_files('obs','Observation',patches['Random Date'], 
-                patches['Random Hour'],patches['Random Patch']) 
+            if model_type == 'CNN': 
+                obs_data = patches['Obs Label'].values.astype('int')
+            elif model_type == 'UNET':
+                obs_data = self.read_files('obs','Observation',patches['Random Date'], 
+                    patches['Random Hour'],patches['Random Patch']) 
 
             #Extracting model patches
-            member_data = self.read_files(mode,member,patches['Random Date'], 
+            member_data = self.read_files('train',member,patches['Random Date'], 
                 patches['Random Hour'],patches['Random Patch']) 
             if member_data is None: 
                 print('No training data found')
                 return None,None
             
-            #Resample data for balanced classes
-            #resampling_model = SMOTEENN(sampling_strategy=self.class_category,random_state=42)
-            #member_smote_data = member_data.reshape(member_data.shape[0],*member_data.shape[1:].ravel())
-            #print(member_smote_data.shape)
-            #member_resampled_data, member_resampled_label
-            
             #Standardize data
-            standard_member_feature = self.standardize_data(member,member_data,mode='train') 
+            standard_data = self.standardize_data(member,member_data,
+                filename_args,train_dates,'train') 
 
             #Output standard training data
-            with h5py.File(train_features_file, 'w') as mhf: 
-                mhf.create_dataset("data",data=standard_member_feature)
-            print(f'Writing out {train_features_file}')
+            with h5py.File(train_predictor_file, 'w') as mhf: 
+                mhf.create_dataset("data",data=standard_data)
+            print(f'Writing out {train_predictor_file}')
             
-            with h5py.File(train_labels_file, 'w') as ohf: 
-                ohf.create_dataset("data",data=obs_label)
-            print(f'Writing out {train_labels_file}')
-        return standard_member_feature, obs_label
+            with h5py.File(train_obs_file, 'w') as ohf: 
+                ohf.create_dataset("data",data=obs_data)
+            print(f'Writing out {train_obs_file}')
+        return standard_data, obs_data
     
 
-    def training_data_selection(self,member,train_cases_file):
+    def training_data_selection(self,member,train_dates,train_cases_file,
+        model_type):
         """
         Function to select random patches to train a CNN. Observation files
         are loaded and read to create a balanced dataset with 
@@ -139,18 +131,14 @@ class DLDataEngineering(object):
             Pandas dataframe with random patch information
         """ 
         
-        string_dates = pd.date_range(start=self.start_dates['train'],
-            end=self.end_dates['train'],freq='1D').strftime(self.run_date_format)
-        
         #Place all obs data into respective category
         cols = ['Random Date','Random Hour','Random Patch','Obs Label'] 
         print(f'Selecting {self.num_examples} random {member} training samples')
         
         daily_obs = []
         #Loop through each date
-        for str_date in string_dates: 
+        for str_date in train_dates: 
             print(str_date)
-            #Loop through each size category:
             #If there are model or obs files, continue to next date
             obs_file = glob(self.hf_path+f'/obs/*obs*{str_date}*')
             # continue if daily obs file not found
@@ -162,17 +150,21 @@ class DLDataEngineering(object):
             except: continue
             #Open obs file
             with h5py.File(obs_file[0],'r') as ohf: obs_data = ohf['data'][()]
+            #Get obs labels
             for hour in np.arange(obs_data.shape[0]):
                 for patch in np.arange(obs_data.shape[1]):
-                    max_obs_value = np.nanmax(obs_data[hour,patch])
-                    if max_obs_value > 50.: 
-                        daily_obs.append((str_date,hour,patch,3))
-                    elif max_obs_value > 25.: 
-                        daily_obs.append((str_date,hour,patch,2))
-                    elif max_obs_value > 5.: 
-                        daily_obs.append((str_date,hour,patch,1))
-                    else: 
-                        daily_obs.append((str_date,hour,patch,0))
+                    if model_type == 'CNN': 
+                        daily_obs.append((str_date,hour,patch,obs_data[hour,patch]))
+                    else:
+                        max_obs_value = np.nanmax(obs_data[hour,patch])
+                        if max_obs_value > 50.: 
+                            daily_obs.append((str_date,hour,patch,3))
+                        elif max_obs_value > 25.: 
+                            daily_obs.append((str_date,hour,patch,2))
+                        elif max_obs_value > 5.: 
+                            daily_obs.append((str_date,hour,patch,1))
+                        else: 
+                            daily_obs.append((str_date,hour,patch,0))
             del obs_data
         if len(daily_obs) < 1:
             print('No training data found')
@@ -351,22 +343,6 @@ class DLDataEngineering(object):
             if d%20 == 0:print(d,date)
             args = (extraction_files,np.array(hour)[date_inds],np.array(patch)[date_inds])
             patch_data.append(pool.apply_async(self.extract_data,args))
-
-            '''
-            #Extract forecast data
-            if mode =='forecast': patch_data.append(
-                pool.apply_async(self.extract_data,(mode,member_feature_files)))
-            #Extract training data 
-            if mode == 'train':
-                if d%20 == 0:print(d,date)
-                args = (mode,member_feature_files,hour[date_inds].values,
-                    patch[date_inds].values)
-            #Extract validation data 
-            elif mode == 'valid': 
-                if d%5 == 0:print(d,date)
-                args = (mode,member_feature_files,np.unique(hour[date_inds].values),None)
-                patch_data.append(pool.apply_async(self.extract_data,args))
-            '''
         pool.close()
         pool.join()
         #If there are no data, return None
@@ -413,7 +389,8 @@ class DLDataEngineering(object):
         del data
         return reshaped_data
 
-    def standardize_data(self,member,model_data,mode=None):
+    def standardize_data(self,member,model_data,filename_args=None,
+        train_dates=None,mode=None):
         """
         Function to standardize data and output the training 
         mean and standard deviation to apply to testing data.
@@ -424,10 +401,7 @@ class DLDataEngineering(object):
         Returns:
             Standardized data
         """
-        scaling_file = self.model_path+\
-            f'/{member}_{self.start_dates["train"].strftime("%Y%m%d")}'+\
-            f'_{self.end_dates["train"].strftime("%Y%m%d")}'+\
-            f'_{self.num_examples}_training_scaling_values.csv'
+        scaling_file = filename_args+'training_scaling_values.csv'
 
         if exists(scaling_file):
             if mode is not None: print(f'Opening {scaling_file}')
@@ -443,10 +417,8 @@ class DLDataEngineering(object):
             
         min_max_values = (scaling_values['max'] - scaling_values['min']).values
         standard_model_data = (model_data - scaling_values['min'].values)/min_max_values
-        for n in np.arange(model_data.shape[-1]):
-            print(self.predictors[n],'  Max',
-                np.nanmax(standard_model_data[:,:,:,n]), 
-                '   Min',np.nanmin(standard_model_data[:,:,:,n]))
-        del scaling_values, model_data
+        del model_data
+
+        print(np.nanmax(standard_model_data), np.nanmin(standard_model_data))
         return standard_model_data
     

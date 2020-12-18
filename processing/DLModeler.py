@@ -1,4 +1,5 @@
-from util.make_proj_grids import make_proj_grids, read_ncar_map_file
+from processing.DLDataEngineering  import DLDataEngineering
+from sklearn.preprocessing import OneHotEncoder
 from os.path import exists
 import pandas as pd
 import numpy as np
@@ -15,36 +16,76 @@ import matplotlib.pyplot as plt
 
 
 class DLModeler(object):
-    def __init__(self,model_path,start_dates,end_dates,var_name,
-        num_examples,class_percentages):
+    def __init__(self,model_path,hf_path,num_examples,
+        class_percentages,predictors):
         
         self.model_path = model_path
-        self.start_dates = start_dates
-        self.end_dates = end_dates
-        self.var_name = var_name
+        self.hf_path = hf_path
         self.num_examples = num_examples
         self.class_percentages = class_percentages
     
+        
+        long_predictors = []
+        #Shorten predictor names
+        
+        for predictor in predictors:
+            if "_" in predictor: 
+                predictor_name = predictor.split('_')[0].upper() + predictor.split('_')[-1]
+            elif " " in predictor: 
+                predictor_name = ''.join([v[0].upper() for v in predictor.split()])
+            else: predictor_name = predictor
+            long_predictors.append(predictor_name)
+         
+        self.predictors = np.array(long_predictors)
     
-        self.model_args = '{0}_{1}_{2}'.format(
-            self.start_dates,self.end_dates,self.num_examples)
+        #Class to read data and standardize
+        self.dldataeng = DLDataEngineering(self.model_path,self.hf_path, 
+            self.num_examples,self.class_percentages,self.predictors)
+        
         return
+            
 
-    def train_UNET(self,member,input_data):
+    def train_models(self,member,train_dates,valid_dates,model_type):
+        """
+        Function that reads and extracts pre-processed 2d member data 
+        from an ensemble to train a convolutional neural net (cnn) or 
+        UNET. 
+        The model data is standardized before being input to the cnn, 
+        with the observation data in the shape (# examples, # classes). 
+
+        Args:
+            member (str): ensemble member data that trains a DL model
+        """
+        self.model_args='{0}_{1}_{2}'.format(train_dates[0],
+            train_dates[-1],self.num_examples)
+        
+        train_data, train_label = self.dldataeng.extract_training_data(member,train_dates,model_type)
+        
+        #valid_data, valid_label = self.dldataeng.extract_validation_data(member,valid_dates,model_type)
+        valid_data, valid_label = [],[]
+    
+        if model_type == 'CNN':
+            onehot_encoder = OneHotEncoder(sparse=False,categories='auto')
+            encoded_label = onehot_encoder.fit_transform(train_label.reshape(-1, 1))
+            self.train_CNN(member,train_data,encoded_label,valid_data,valid_label)
+
+        elif model_type == 'UNET':
+            self.train_UNET(member,train_data,train_label,valid_data,valid_label)
+        
+        return 
+
+    def train_UNET(self,member,trainX,trainY,validX,validY):
         
         model_file = self.model_path + f'/{member}_{self.model_args}_UNET.h5'
         print(model_file)
         
         if exists(model_file):
-            del input_data
+            del trainX,trainY,validX,validY
             model = models.load_model(model_file)
             print(f'\nOpening {model_file}\n')
             #self.validate_UNET(model,validX,validY,threshold_file)
             return 
 
-
-        trainX,trainY,validX,validY = input_data
-        
         print('\nTraining {0} models'.format(member))
         print('Training data shape {0}'.format(np.shape(trainX)))
         print('Training label data shape {0}\n'.format(np.shape(trainY)))
@@ -90,11 +131,23 @@ class DLModeler(object):
                 fill_mode="nearest")
             
         #Fit UNET
-        n_epochs = 10
+        n_epochs = 2 #10
         bs = 10
             
         train_generator = aug.flow(trainX,trainY,batch_size=bs)
         conv_hist = unet.fit(train_generator,epochs=n_epochs,verbose=1) 
+        
+        '''
+        pred_s = trainX[0].reshape(1,input_shape[0],
+        input_shape[1],input_shape[2])
+
+        prediction = unet.predict(pred_s)[0,:,:,:]
+        print(prediction.shape)
+        plt.imshow(prediction)
+        plt.colorbar()
+        plt.show()
+        return
+        '''
         #Save trained model
         #model.save(model_file)
         print(f'Writing out {model_file}')
@@ -215,9 +268,9 @@ class DLModeler(object):
         return 
                 
     
-    def predict_models(self,
-        member,subset_map_data,total_map_data,date,dldataeng,
-        patch_radius,map_conversion_inds,forecast_grid_path):
+    def predict_models(self,member,subset_map_data,total_map_data,
+        date,patch_radius,map_conversion_inds,forecast_grid_path,
+        model_type):
         """
         Function that opens a pre-trained convolutional neural net (cnn). 
         and predicts hail probability forecasts for a single ensemble member.
