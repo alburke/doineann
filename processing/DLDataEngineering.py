@@ -12,14 +12,16 @@ import multiprocessing as mp
 
 class DLDataEngineering(object):
     def __init__(self,model_path,hf_path,
-        num_examples,class_category,predictors):
+        num_examples,class_category,predictors,
+        model_args):
         
     
         self.model_path = model_path
         self.hf_path = hf_path
         self.num_examples = num_examples
         self.class_category = class_category
-   
+        self.model_args = model_args
+
         long_predictors = []
         #Shorten predictor names
         for predictor in predictors:
@@ -31,7 +33,6 @@ class DLDataEngineering(object):
             long_predictors.append(predictor_name)
          
         self.predictors = np.array(long_predictors)
-
         return
     
     ################################################
@@ -48,14 +49,10 @@ class DLDataEngineering(object):
         Returns:
             Sliced ensemble member data and observations.
         """
-        
         print()
-        #mode = 'train'
 
-        #Training arguments
-        filename_args = self.model_path+'/{0}_{1}_{2}_{3}_'.format(
-            member,train_dates[0],train_dates[-1],self.num_examples)
-
+        filename_args = self.model_path+f'/{member}_{self.model_args}_'
+        
         #Random patches for training
         train_cases_file = filename_args+'training_cases.csv'
         
@@ -63,8 +60,8 @@ class DLDataEngineering(object):
         if model_type == 'CNN':
             train_obs_file = filename_args+'training_obs.h5'
         elif model_type == 'UNET':
-            train_obs_file = self.model_path+'/{0}_{1}_{2}_training_obs.h5'.format(
-                train_dates[0],train_dates[-1],self.num_examples)
+            train_obs_file = self.model_path+\
+            f'/{member}_{self.model_args}_training_obs.h5'
         
         #Standard ensemble member data associated with random patches
         train_predictor_file = filename_args+'standard_training_predictors.h5'
@@ -102,8 +99,8 @@ class DLDataEngineering(object):
                 return None,None
             
             #Standardize data
-            standard_data = self.standardize_data(member,member_data,
-                filename_args,train_dates,'train') 
+            standard_data = self.standardize_data(
+                member,member_data,train_dates,'train') 
 
             #Output standard training data
             with h5py.File(train_predictor_file, 'w') as mhf: 
@@ -138,7 +135,6 @@ class DLDataEngineering(object):
         daily_obs = []
         #Loop through each date
         for str_date in train_dates: 
-            print(str_date)
             #If there are model or obs files, continue to next date
             obs_file = glob(self.hf_path+f'/obs/*obs*{str_date}*')
             # continue if daily obs file not found
@@ -148,6 +144,7 @@ class DLDataEngineering(object):
                 member_feature_files = [glob(self.hf_path+f'/{member}/{var}*{str_date}*')[0]
                 for var in self.predictors]
             except: continue
+            print(str_date)
             #Open obs file
             with h5py.File(obs_file[0],'r') as ohf: obs_data = ohf['data'][()]
             #Get obs labels
@@ -165,6 +162,7 @@ class DLDataEngineering(object):
                             daily_obs.append((str_date,hour,patch,1))
                         else: 
                             daily_obs.append((str_date,hour,patch,0))
+            
             del obs_data
         if len(daily_obs) < 1:
             print('No training data found')
@@ -251,7 +249,8 @@ class DLDataEngineering(object):
             return None,None
             
         #Standardize data
-        standard_valid_feature = self.standardize_data(member,valid_member_data,mode='valid') 
+        standard_valid_feature = self.standardize_data(
+            member,valid_member_data,mode='valid') 
             
         #Output standard training data
         with h5py.File(valid_features_file, 'w') as hf: 
@@ -332,17 +331,25 @@ class DLDataEngineering(object):
 
         print(f'Reading {len(np.unique(dates))} unique {member} date file(s)')
         for d,date in enumerate(np.unique(dates)):
-            date_inds = np.where(dates == date)[0]    
             #Find all model variable files for a given date
             if mode == 'obs':
                 try: extraction_files = glob(self.hf_path+f'/obs/*{date}*.h5')
                 except: continue
             else: 
-                extraction_files = [glob(self.hf_path+f'/{member}/{var}*{date}*')[0]
-                    for var in self.predictors]
+                try:
+                    extraction_files = [glob(self.hf_path+f'/{member}/{var}*{date}*')[0]
+                        for var in self.predictors]
+                except: continue
             if d%20 == 0:print(d,date)
-            args = (extraction_files,np.array(hour)[date_inds],np.array(patch)[date_inds])
-            patch_data.append(pool.apply_async(self.extract_data,args))
+            if len(dates) == 1: 
+                pool.close()
+                pool.join()
+                return self.extract_data(extraction_files,np.array(hour)[0],np.array(patch)[0])
+            else: 
+                date_inds = np.where(dates == date)[0]
+                args = (extraction_files,np.array(hour)[date_inds],np.array(patch)[date_inds])
+                patch_data.append(pool.apply_async(self.extract_data,args))
+            
         pool.close()
         pool.join()
         #If there are no data, return None
@@ -368,28 +375,31 @@ class DLDataEngineering(object):
         for filename in files:
             h5 = h5py.File(filename,'r')
             compressed_data = h5['data']
-            if hours is None and patches is None: hourly_data = compressed_data[()]
-            else: 
+            if hours is None and patches is None:
+                data.append(compressed_data[()])
+            else:
                 hourly_data = np.array([  
                         compressed_data[hours[i],patches[i],:,:] 
                         for i in np.arange(len(hours))
                         ])
+                if 'obs' in filename: return np.array(hourly_data)
+                if hourly_data.shape[0] == len(hours): 
+                    data.append(hourly_data.reshape(-1,*hourly_data.shape[-2:]))
+                else: data.append(hourly_data)
+                del hourly_data
             del compressed_data
             h5.close()
-            if 'obs' in filename: return np.array(hourly_data)
-            if hourly_data.shape[0] == len(hours): 
-                selected_variable_data = hourly_data.reshape(-1,*hourly_data.shape[-2:])
-            else: selected_variable_data = hourly_data
-            data.append(selected_variable_data)
-            del hourly_data
-            del selected_variable_data
-        # Move variables to last dimension 
+        # Move variables to last dimension
         reshaped_data = np.empty( (np.shape(data)[1:]+(np.shape(data)[0],)) )*np.nan
-        for v in np.arange(np.shape(data)[0]): reshaped_data[:,:,:,v] = data[v]
+        for v in np.arange(np.shape(data)[0]): 
+            if len(np.shape(data)) == 4:
+                reshaped_data[:,:,:,v] = data[v]
+            elif len(np.shape(data)) == 5:
+                reshaped_data[:,:,:,:,v] = data[v]
         del data
         return reshaped_data
 
-    def standardize_data(self,member,model_data,filename_args=None,
+    def standardize_data(self,member,model_data,
         train_dates=None,mode=None):
         """
         Function to standardize data and output the training 
@@ -401,7 +411,7 @@ class DLDataEngineering(object):
         Returns:
             Standardized data
         """
-        scaling_file = filename_args+'training_scaling_values.csv'
+        scaling_file = self.model_path+f'/{member}_{self.model_args}_training_scaling_values.csv'
 
         if exists(scaling_file):
             if mode is not None: print(f'Opening {scaling_file}')

@@ -1,29 +1,48 @@
 from processing.DLDataEngineering  import DLDataEngineering
 from sklearn.preprocessing import OneHotEncoder
-from os.path import exists
 import pandas as pd
 import numpy as np
 import h5py
+import os
+
+from scipy.ndimage import gaussian_filter
         
 #Deep learning packages
 import tensorflow as tf
-from tensorflow.keras import layers,models
+#from tensorflow import keras
+from tensorflow.keras.layers import Input, Conv2D, Dropout, Activation, UpSampling2D, GlobalMaxPooling2D, multiply
+from tensorflow.keras.backend import max
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
+
+
+#from tensorflow import keras 
 from sklearn.metrics import f1_score,roc_auc_score
 
-
 import matplotlib.pyplot as plt
+import cartopy.feature as cf 
+import cartopy.crs as ccrs
+import cartopy
+
+
+from keras_unet_collection import models, base, utils
+
+
+
+
+
 
 
 class DLModeler(object):
     def __init__(self,model_path,hf_path,num_examples,
-        class_percentages,predictors):
+        class_percentages,predictors,model_args,
+        model_type):
         
         self.model_path = model_path
         self.hf_path = hf_path
         self.num_examples = num_examples
         self.class_percentages = class_percentages
-    
+        self.model_args = model_args 
+        self.model_type = model_type
         
         long_predictors = []
         #Shorten predictor names
@@ -40,12 +59,14 @@ class DLModeler(object):
     
         #Class to read data and standardize
         self.dldataeng = DLDataEngineering(self.model_path,self.hf_path, 
-            self.num_examples,self.class_percentages,self.predictors)
+            self.num_examples,self.class_percentages,self.predictors,
+            self.model_args)
+        
         
         return
             
 
-    def train_models(self,member,train_dates,valid_dates,model_type):
+    def train_models(self,member,train_dates,valid_dates):
         """
         Function that reads and extracts pre-processed 2d member data 
         from an ensemble to train a convolutional neural net (cnn) or 
@@ -56,20 +77,18 @@ class DLModeler(object):
         Args:
             member (str): ensemble member data that trains a DL model
         """
-        self.model_args='{0}_{1}_{2}'.format(train_dates[0],
-            train_dates[-1],self.num_examples)
+        train_data, train_label = self.dldataeng.extract_training_data(member,
+            train_dates,self.model_type)
         
-        train_data, train_label = self.dldataeng.extract_training_data(member,train_dates,model_type)
-        
-        #valid_data, valid_label = self.dldataeng.extract_validation_data(member,valid_dates,model_type)
+        #valid_data, valid_label = self.dldataeng.extract_validation_data(member,valid_dates,self.model_type)
         valid_data, valid_label = [],[]
     
-        if model_type == 'CNN':
+        if self.model_type == 'CNN':
             onehot_encoder = OneHotEncoder(sparse=False,categories='auto')
             encoded_label = onehot_encoder.fit_transform(train_label.reshape(-1, 1))
             self.train_CNN(member,train_data,encoded_label,valid_data,valid_label)
 
-        elif model_type == 'UNET':
+        elif self.model_type == 'UNET':
             self.train_UNET(member,train_data,train_label,valid_data,valid_label)
         
         return 
@@ -79,20 +98,90 @@ class DLModeler(object):
         model_file = self.model_path + f'/{member}_{self.model_args}_UNET.h5'
         print(model_file)
         
-        if exists(model_file):
+        '''
+        if os.path.exists(model_file):
             del trainX,trainY,validX,validY
-            model = models.load_model(model_file)
+            unet = tf.keras.models.load_model(model_file)
             print(f'\nOpening {model_file}\n')
             #self.validate_UNET(model,validX,validY,threshold_file)
             return 
-
+        '''
         print('\nTraining {0} models'.format(member))
         print('Training data shape {0}'.format(np.shape(trainX)))
         print('Training label data shape {0}\n'.format(np.shape(trainY)))
         #print('Validation data shape {0}'.format(np.shape(validX)))
         #print('Validation label data shape {0}\n'.format(np.shape(validY)))
         
-        input_shape = np.shape(trainX[0])
+        
+        name = 'unet3plus'
+        activation = 'ReLU'
+        filter_num_down = [16, 32, 64, 128, 256]#, 512]
+        filter_num_skip = [32, 32, 32, 32]
+        filter_num_aggregate = 160
+
+        stack_num_down = 2
+        stack_num_up = 1
+        n_labels = 1
+
+        # `unet_3plus_2d_base` accepts an input tensor 
+        # and produces output tensors from different upsampling levels
+        # ---------------------------------------- #
+        input_tensor = tf.keras.layers.Input( np.shape(trainX[0]) ) 
+        # base architecture
+        X_decoder = base.unet_3plus_2d_base(
+            input_tensor, filter_num_down, filter_num_skip, filter_num_aggregate, 
+            stack_num_down=stack_num_down, stack_num_up=stack_num_up, activation=activation, 
+            batch_norm=True, pool=True, unpool=True, backbone=None, name=name)
+        
+        print(X_decoder)
+
+        # allocating deep supervision tensors
+        OUT_stack = []
+        # reverse indexing `X_decoder`, so smaller tensors have larger list indices 
+        X_decoder = X_decoder[::-1]
+
+        # deep supervision outputs
+        for i in range(1, len(X_decoder)):
+            # 3-by-3 conv2d --> upsampling --> sigmoid output activation
+            pool_size = 2**(i)
+            X = Conv2D(n_labels, 3, padding='same', name='{}_output_conv1_{}'.format(name, i-1))(X_decoder[i])
+            X = UpSampling2D((pool_size, pool_size), interpolation='bilinear', 
+                name='{}_output_sup{}'.format(name, i-1))(X)
+            X = Activation('relu', name='{}_output_sup{}_activation'.format(name, i-1))(X)
+            # collecting deep supervision tensors
+            OUT_stack.append(X)
+        print()
+        print(OUT_stack)
+        # the final output (without extra upsampling)
+        # 3-by-3 conv2d --> sigmoid output activation
+        X = Conv2D(n_labels, 3, padding='same', name='{}_output_final'.format(name))(X_decoder[0])
+        X = Activation('relu', name='{}_output_final_activation'.format(name))(X)
+        # collecting final output tensors
+        OUT_stack.append(X)
+        
+        unet3plus = tf.keras.models.Model([input_tensor,], OUT_stack)
+
+        unet3plus.compile(loss=[dice_loss,dice_loss,
+            dice_loss,dice_loss,dice_loss],
+            loss_weights=[0.25, 0.25, 0.25, 0.25, 1.0],
+            optimizer=tf.keras.optimizers.Adam(lr=1e-4))
+
+        print(unet3plus.summary())
+         
+        #Augment data
+        aug = ImageDataGenerator(
+                #rotation_range=10,zoom_range=0.15,
+                width_shift_range=0.2,height_shift_range=0.2,
+                fill_mode="nearest")
+            
+        #Fit UNET
+        n_epochs = 2
+        bs = 400
+        
+        train_generator = aug.flow(trainX,trainY,batch_size=bs)
+        conv_hist = unet3plus.fit(train_generator,epochs=n_epochs,verbose=1) 
+        
+        """ 
         filters = [16, 24, 32, 48, 64]
 
         #First layer: input shape (y,x,# variables) 
@@ -117,22 +206,22 @@ class DLModeler(object):
         u4 = up_block(u3, c1, filters[0]) #64 -> 128
         
         #Output layer
-        outputs = layers.Conv2D(1, (1, 1), padding="same", activation="relu")(u4)
+        outputs = layers.Conv2D(1, (1, 1), padding='same', activation="relu")(u4)
         
         #Compile UNET
         unet = models.Model(inputs, outputs)
-        unet.compile(optimizer=tf.keras.optimizers.Adam(),loss='mse')
+        unet.compile(optimizer=tf.keras.optimizers.Adam(),loss=dice_loss)
         print(unet.summary())
         
         #Augment data
-        aug = ImageDataGenerator(
-                rotation_range=10,zoom_range=0.15,
+        aug = tf.keras.ImageDataGenerator(
+                #rotation_range=10,zoom_range=0.15,
                 width_shift_range=0.2,height_shift_range=0.2,
                 fill_mode="nearest")
             
         #Fit UNET
-        n_epochs = 2 #10
-        bs = 10
+        n_epochs = 10
+        bs = 256
             
         train_generator = aug.flow(trainX,trainY,batch_size=bs)
         conv_hist = unet.fit(train_generator,epochs=n_epochs,verbose=1) 
@@ -147,15 +236,16 @@ class DLModeler(object):
         plt.colorbar()
         plt.show()
         return
-        '''
+        """
         #Save trained model
-        #model.save(model_file)
+        unet3plus.save(model_file)
         print(f'Writing out {model_file}')
         
         #Clear graphs
         tf.keras.backend.clear_session()
         
         #self.validate_UNET(model,validX,validY,threshold_file)
+        
         return 
     
     
@@ -180,7 +270,7 @@ class DLModeler(object):
         
         model_file = self.model_path + f'/{member}_{self.model_args}_CNN_model.h5'
         print(model_file)
-        if not exists(model_file):
+        if not os.path.exists(model_file):
             # Clear graphs
             tf.keras.backend.clear_session()
             
@@ -231,7 +321,7 @@ class DLModeler(object):
         del trainY,trainX
         
         threshold_file = self.model_path + f'/{member}_{self.model_args}_CNN_model_threshold.h5'
-        if exists(threshold_file): 
+        if os.path.exists(threshold_file): 
             del validX,validY
             return
         
@@ -268,9 +358,9 @@ class DLModeler(object):
         return 
                 
     
-    def predict_models(self,member,subset_map_data,total_map_data,
-        date,patch_radius,map_conversion_inds,forecast_grid_path,
-        model_type):
+    def predict_model(self,member,patch_map_conversion_indices,
+        total_map_shape,subset_map_shape,date,patch_radius,forecast_grid_path,#):
+        lon_grid,lat_grid):
         """
         Function that opens a pre-trained convolutional neural net (cnn). 
         and predicts hail probability forecasts for a single ensemble member.
@@ -279,51 +369,147 @@ class DLModeler(object):
         Right now only includes severe hail prediction, not sig-severe
         """
         
+        ################## 
+        # Load in any saved DL model files
+        ################## 
+         
+        #Clear any saved DL graphs
+        tf.keras.backend.clear_session()
+        
+        #Load DL model
+        model_file = self.model_path + f'/{member}_{self.model_args}_UNET.h5'
+        DL_model = models.load_model(model_file) 
+        
+        if self.model_type == 'CNN':
+            #Use minimum prob threshold chosen with validation data
+            threshold_file = self.model_path + f'/{member}_{self.model_args}_CNN_model_threshold.h5'
+            if not os.path.exists(threshold_file):
+                print('No thresholds found')
+                return 
+            prob_thresh = 0 #pd.read_csv(threshold_file).loc[0,'size_threshold']+0.05
+            print(prob_thresh)    
+            total_count = 0
+        
+        ################## 
         #Extract forecast data (#hours, #patches, nx, ny, #variables)
-        data = dldataeng.read_files('forecast',member,date,[None],[None])
-        if data is None: 
+        ################## 
+        
+        forecast_data = self.dldataeng.read_files('forecast',member,date,[None],[None])
+        
+        if forecast_data is None: 
             print('No forecast data found')
             return
         
-        tf.keras.backend.clear_session()
-        cnn_model_file = self.model_args+f'{member}_CNN_model.h5'
-        cnn_model = models.load_model(model_file) 
+        ################## 
+        # Standardize hourly data
+        ################## 
         
-        #Use minimum prob threshold chosen with validation data
-        threshold_file = self.model_path + f'/{member}_{self.model_args}_CNN_model_threshold.h5'
-        if not os.path.exists(threshold_file):
-            print('No thresholds found')
-            return 
-        prob_thresh = 0 #pd.read_csv(threshold_file).loc[0,'size_threshold']+0.05
-        print(prob_thresh)    
-        # Produce hail forecast using standardized forecast data every hour
-        total_grid = np.zeros((data.shape[0],)+total_map_data['lat'].ravel().shape)
-        total_count = 0
-        for hour in np.arange(data.shape[0]):
-            standard_forecast_data = dlprocess.standardize_data(member,data[hour])
+        standard_forecast_data = np.array([self.dldataeng.standardize_data(member,forecast_data[hour]) 
+            for hour in np.arange(forecast_data.shape[0])])
+        
+        del forecast_data
+        ################## 
+        # Produce gridded hourly hail forecast 
+        ################## 
+        
+        #total_grid = np.zeros((standard_forecast_data.shape[0],
+        #    total_map_shape[0]*total_map_shape[1]) )
+
+        total_grid = np.zeros( (standard_forecast_data.shape[0],
+            total_map_shape[0]*total_map_shape[1]) )#*np.nan
+
+        for hour in np.arange(standard_forecast_data.shape[0]):
             #Predict probability of severe hail
-            cnn_preds = cnn_model.predict(standard_forecast_data)
-            severe_proba_indices = np.where( (cnn_preds[:,2]+cnn_preds[:,3]) >= prob_thresh)[0]
-            severe_patches = np.zeros_like(subset_map_data[0])
-            #If no hourly severe hail predicted, continue
-            if len(severe_proba_indices) <1 : continue
-            severe_patches[severe_proba_indices] = np.full((patch_radius,patch_radius), 1)
-            total_grid[hour,map_conversion_inds] = severe_patches.ravel()
-            print(hour,len(severe_proba_indices),np.nanmax((cnn_preds[:,2]+cnn_preds[:,3])))
-            total_count += len(severe_proba_indices)
-        print('Total severe probs:',total_count)
-        print()
-    
+            DL_prediction = DL_model.predict(standard_forecast_data[hour])
+            ######
+            # Will need to fix CNN code to reflect the conversion inds are in 
+            #patches x (patch_radius*patch_radius) instead of (patches*radius*radius)
+            #####
+            if self.model_type == 'CNN':
+                severe_proba_indices = np.where( (cnn_preds[:,2]+cnn_preds[:,3]) >= prob_thresh)[0]
+                severe_patches = np.zeros(subset_map_shape)
+                #If no hourly severe hail predicted, continue
+                if len(severe_proba_indices) <1 : continue
+                severe_patches[severe_proba_indices] = np.full((patch_radius,patch_radius), 1)
+                total_grid[hour,map_conversion_inds] = severe_patches.ravel()
+                print(hour,len(severe_proba_indices),np.nanmax((cnn_preds[:,2]+cnn_preds[:,3])))
+                total_count += len(severe_proba_indices)
+                print('Total severe probs:',total_count)
+                print()
+            elif self.model_type == 'UNET':
+                for patch in np.arange(standard_forecast_data.shape[1]):
+                    patch_indices = patch_map_conversion_indices[patch]
+                    #Gets rid of overlapping edges
+                    overlap_pts = 4
+                    total_grid[hour,patch_indices] = DL_prediction[patch,
+                        overlap_pts:-overlap_pts,overlap_pts:-overlap_pts,0].ravel()
+                    
+                    #hourly_patch_data = DL_prediction[patch,:,:,0].ravel()
+                    #total_grid[hour,patch_indices] = np.nanmean(
+                    #    (total_grid[hour,patch_indices],hourly_patch_data ),
+                    #    axis=0)
+                    '''
+                    plt.imshow(hourly_patch_data)
+                    plt.colorbar()
+                    plt.show()
+                    plt.imshow(snip_hourly_patch_data)
+                    plt.colorbar()
+                    plt.show()
+                    return 
+                    '''
+                    
+                    #if all(total_grid[hour,patch_indices]) == True:
+                    #    #if no overlapping tiles 
+                    #    total_grid[hour,patch_indices] = hourly_patch_data
+                    #else: 
+                        #total_grid[hour,patch_indices] = np.nanmean(
+                        #total_grid[hour,patch_indices] = gaussian_filter(combined_data,32)
+            #Smooth edge values
+
+            #total_grid[hour] = gaussian_filter(total_grid[hour],14)
+            #total_grid[hour][total_grid[hour] <= 0.1] = 0.0
+        del standard_forecast_data
+        del DL_prediction
+        output_data=total_grid.reshape((total_grid.shape[0],)+total_map_shape)
+        
+        date_outpath = forecast_grid_path + f'{date[0][:-5]}/'
         #Output gridded forecasts
-        date_outpath = forecast_grid_path + '{0}/'.format(date[:-5])
         if not os.path.exists(date_outpath): os.makedirs(date_outpath)
-        gridded_out_file = date_outpath + '{0}_{1}_forecast_grid.h5'.format(member,date)
-        print('Writing out {0}'.format(gridded_out_file))
+        gridded_out_file = date_outpath + f'{member}_{date[0]}_forecast_grid.h5'
+        print(f'Writing out {gridded_out_file}')
+
         with h5py.File(gridded_out_file, 'w') as hf: hf.create_dataset("data",
-            data=total_grid.reshape((2,data.shape[0],)+total_map_data['lat'].shape),
-            compression='gzip',compression_opts=6)
+            output_data,compression='gzip',compression_opts=6)
+        
+        fig = plt.figure()
+        ax = fig.add_subplot(1,1,1,projection = ccrs.LambertConformal())
+        ax.add_feature(cf.COASTLINE)   
+        ax.add_feature(cf.OCEAN)
+        ax.add_feature(cf.BORDERS,linestyle='-')
+        ax.add_feature(cf.STATES.with_scale('50m'),linestyle='-',edgecolor='black')
+        plt.contourf(lon_grid,lat_grid,output_data[0],transform=ccrs.PlateCarree())
+        plt.colorbar()
+        plt.show()
+
+        fig = plt.figure()
+        ax = fig.add_subplot(1,1,1,projection = ccrs.LambertConformal())
+        ax.add_feature(cf.COASTLINE)   
+        ax.add_feature(cf.OCEAN)
+        ax.add_feature(cf.BORDERS,linestyle='-')
+        ax.add_feature(cf.STATES.with_scale('50m'),linestyle='-',edgecolor='black')
+        smooth=gaussian_filter(output_data[0],32) 
+        plt.contourf(lon_grid,lat_grid,smooth,transform=ccrs.PlateCarree())
+        plt.colorbar()
+        plt.show()
+        
         return
 
+def dice_loss(y_true, y_pred):
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.math.sigmoid(y_pred)
+    numerator = 2 * tf.reduce_sum(y_true * y_pred)
+    denominator = tf.reduce_sum(y_true + y_pred)
+    return 1 - numerator / denominator
 
 '''
 From: https://idiotdeveloper.com/unet-segmentation-in-tensorflow/

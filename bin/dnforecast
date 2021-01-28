@@ -32,37 +32,41 @@ def main():
     config.valid_hours = np.arange(config.start_hour, config.end_hour)
     if not hasattr(config, "run_date_format"): config.run_date_format = "%Y%m%d-%H"
     
-    #Class to train and predict on given data
-    dlmodel = DLModeler(config.model_path,config.hf_path,
-        config.num_examples,config.class_percentages,config.predictors)
-   
-    #Train DL Models
-    if args.train:
-        train_dates = pd.date_range(start=config.start_dates['train'],
+    train_dates = pd.date_range(start=config.start_dates['train'],
             end=config.end_dates['train'],freq='1D'
             ).strftime(config.run_date_format)
         
-        valid_dates = pd.date_range(start=config.start_dates['valid'],
-            end=config.end_dates['valid'],freq='1D'
-            ).strftime(config.run_date_format)
-        
-        for member in config.ensemble_members:
-            dlmodel.train_models(member,train_dates,valid_dates,config.model_type)
-    
-    #Predict using trained DL models
-    elif args.fore:
-        subset_map_data, map_conversion_inds = forecast_map_info()        
-        
-        forecast_dates = pd.date_range(start=config.start_dates['forecast'],
+    forecast_dates = pd.date_range(start=config.start_dates['forecast'],
             end=config.end_dates['forecast'],freq='1D'
             ).strftime(config.run_date_format)
         
+    valid_dates = pd.date_range(start=config.start_dates['valid'],
+            end=config.end_dates['valid'],freq='1D'
+            ).strftime(config.run_date_format)
+    
+    model_args='{0}_{1}_{2}'.format(train_dates[0],
+            train_dates[-1],config.num_examples)
+    
+    #Class to train and predict on given data
+    dlmodel = DLModeler(config.model_path,config.hf_path,
+        config.num_examples,config.class_percentages,config.predictors,
+        model_args,config.model_type)
+     
+    #Train DL Models
+    if args.train:
+        for member in config.ensemble_members:
+            dlmodel.train_models(member,train_dates,valid_dates)
+    
+    #Predict using trained DL models
+    elif args.fore:
+        total_map_shape,subset_map_shape,patch_map_conversion_indices,lon_grid,lat_grid = forecast_map_info(config)        
+        #total_map_shape,subset_map_shape,patch_map_conversion_indices = forecast_map_info(config)        
         for date in forecast_dates:
             for member in config.ensemble_members:
                 print('\nPredicting {0} {1} data'.format(member,date))
-                dlmodel.predict_model(member,subset_map_data,total_map_data,
-                    date,config.patch_radius,map_conversion_inds,
-                    config.forecast_grid_path,config.model_type)
+                dlmodel.predict_model(member,patch_map_conversion_indices,total_map_shape,subset_map_shape,
+                    [date],config.patch_radius,config.forecast_grid_path,lon_grid,lat_grid)
+                    #[date],config.patch_radius,config.forecast_grid_path)
     return
 
 
@@ -72,18 +76,32 @@ def forecast_map_info(config):
     #Open mapfile over total domain
     proj_dict, grid_dict = read_ncar_map_file(config.model_map_file)
     mapping_data = make_proj_grids(proj_dict, grid_dict)
+    total_map_shape =  mapping_data['lat'].shape
     
     #Create cKDtree to convert patch grid points to the total domain
     tree = cKDTree(np.c_[mapping_data['lon'].ravel(),mapping_data['lat'].ravel()])
-    
+    #del mapping_data
+
     #Open mapfile over subset domain (CONUS)
     subset_map_file = glob(config.hf_path+'/*map*.h5')[0] 
-    subset_map_data = h5py.File(subset_map_file, 'r')['data']
     
-    #Convert subset grid points to total grid using cKDtree
-    _,map_conversion_inds = tree.query(np.c_[subset_data[0].ravel(),
-            subset_data[1].ravel()])
-    return subset_map_data,map_conversion_inds
+    with h5py.File(subset_map_file,'r') as hf: 
+        subset_map_data = hf['data'][()]
+    subset_map_shape = subset_map_data.shape
+
+    patch_map_conversion_indices = []
+    #overlap_pts = 16 
+    for patch in np.arange(subset_map_data.shape[1]):
+        #Convert patch grid points to total grid using cKDtree
+        _,map_conversion_inds = tree.query(
+            np.c_[subset_map_data[0,patch,:,:].ravel(),subset_map_data[1,patch,:,:].ravel()])
+            #np.c_[subset_map_data[0,patch,overlap_pts:-overlap_pts,overlap_pts:-overlap_pts].ravel(),
+            #subset_map_data[1,patch,overlap_pts:-overlap_pts,overlap_pts:-overlap_pts].ravel()])
+        patch_map_conversion_indices.append(map_conversion_inds)
+    print(np.shape(patch_map_conversion_indices))
+    del subset_map_data
+    return total_map_shape,subset_map_shape,patch_map_conversion_indices,mapping_data['lon'],mapping_data['lat']
+    #return mapping_data,total_map_shape,subset_map_shape,patch_map_conversion_indices
 
 if __name__ == "__main__":
     __spec__ = None

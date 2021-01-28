@@ -8,39 +8,41 @@ import os
 
 class DLPreprocessing(object):
     def __init__(self,train,ensemble_name,model_path,
-        hf_path,patch_radius,run_date_format,
-        predictors,start_hour,end_hour,
-        mask=None):
+        hf_path,patch_radius,overlap_size,run_date_format,
+        predictors,start_hour,end_hour,model_type,mask=None):
         
         self.train = train
         self.ensemble_name = ensemble_name
         self.model_path = model_path
         self.hf_path = hf_path
         self.patch_radius = patch_radius
+        self.overlap_size = overlap_size
         self.run_date_format = run_date_format
         self.predictors = predictors
         self.start_hour= start_hour
         self.end_hour=end_hour
         self.mask = mask
-
+        self.model_type = model_type
         return
 
     def process_map_data(self,map_file):
-        lon_lat_file = glob(f'{self.hf_path}/{self.ensemble_name}_map_data.h5')
-        if len(lon_lat_file) < 1: 
+        lon_lat_file = f'{self.hf_path}/{self.ensemble_name}_map_data.h5'
+        if len(glob(lon_lat_file)) < 1: 
             proj_dict, grid_dict = read_ncar_map_file(map_file)
             mapping_data = make_proj_grids(proj_dict, grid_dict)
-            if self.mask is not None:
-                mapping_lat_data = mapping_data['lat']*self.mask
-                mapping_lon_data = mapping_data['lon']*self.mask
-            else:
-                mapping_lat_data = mapping_data['lat']
-                mapping_lon_data = mapping_data['lon']
-            #lon_slices = self.cnn_slice_into_patches(mapping_lon_data,self.patch_radius,self.patch_radius)
-            #lat_slices = self.cnn_slice_into_patches(mapping_lat_data,self.patch_radius,self.patch_radius)
+            mapping_lat_data = mapping_data['lat']
+            mapping_lon_data = mapping_data['lon']
+            if self.model_type == 'CNN':
+                lon_slices = self.cnn_slice_into_patches(
+                    mapping_lon_data,self.patch_radius,self.patch_radius)
+                lat_slices = self.cnn_slice_into_patches(
+                   mapping_lat_data,self.patch_radius,self.patch_radius)
+            elif self.model_type == 'UNET':
+                lon_slices = self.unet_slice_into_patches(
+                    mapping_lon_data,self.patch_radius,self.patch_radius)
+                lat_slices = self.unet_slice_into_patches(
+                   mapping_lat_data,self.patch_radius,self.patch_radius)
             
-            lon_slices = self.unet_slice_into_patches(mapping_lon_data,self.patch_radius,self.patch_radius)
-            lat_slices = self.unet_slice_into_patches(mapping_lat_data,self.patch_radius,self.patch_radius)
             lon_lat_data = np.array((lon_slices,lat_slices))
             print(f'\nWriting map file: {lon_lat_file}\n')
             with h5py.File(lon_lat_file, 'w') as hf:
@@ -68,14 +70,18 @@ class DLPreprocessing(object):
         #Create gridded mrms object 
         gridded_obj = GridOutput(run_date,start_date,end_date)
         gridded_obs_data = gridded_obj.load_obs_data(mrms_variable,mrms_path)
+        if gridded_obs_data is None: 
+            print(f'No {run_date} obs data') 
+            return
         for hour in np.arange(gridded_obs_data.shape[0]): 
             #Slice mrms data 
-            if self.mask is not None: hourly_obs_data = gridded_obs_data[hour]*self.mask
-            else: hourly_obs_data = gridded_obs_data[hour]
-            hourly_obs_patches = self.unet_slice_into_patches(hourly_obs_data,self.patch_radius,self.patch_radius)
+            if self.model_type == 'CNN':
+                labels = self.cnn_slice_into_patches(gridded_obs_data[hour])
             #Label cnn mrms data
-            #labels = self.unet_label_obs_patches(hourly_obs_patches)
-            obs_patch_labels.append(hourly_obs_patches)
+            elif self.model_type == 'UNET':
+                labels = self.unet_slice_into_patches(
+                    gridded_obs_data[hour],self.patch_radius,self.patch_radius)
+            obs_patch_labels.append(labels)
         if np.nanmax(obs_patch_labels) <= 0: return 
         obs_filename=f'{self.hf_path}/obs/obs_{run_date.strftime(self.run_date_format)}.h5'
         print(f'Writing obs file: {obs_filename}')
@@ -83,6 +89,8 @@ class DLPreprocessing(object):
         with h5py.File(obs_filename, 'w') as hf:
             hf.create_dataset("data",data=obs_patch_labels,
             compression='gzip',compression_opts=6)
+        del gridded_obs_data
+
         return 
 
     def process_ensemble_member(self,run_date,member,member_path,map_file):
@@ -103,16 +111,20 @@ class DLPreprocessing(object):
         print("Starting ens processing", member, run_date)
         #Slice each member variable separately over each hour
         gridded_variable_data = gridded_obj.load_model_data(self.model_path,self.predictors)
-        if gridded_variable_data is None: return
+        if gridded_variable_data is None: 
+            print(f'No {run_date} {member} data') 
+            return
         for v,variable in enumerate(self.predictors):
             hourly_patches = [] 
             #Slice hourly data
             for hour in np.arange(gridded_variable_data.shape[0]):
-                if self.mask is not None: masked_gridded_variable = gridded_variable_data[hour,v,:,:]*self.mask
-                else: masked_gridded_variable = gridded_variable_data[hour,v,:,:]
-                #patches = self.cnn_slice_into_patches(masked_gridded_variable,self.patch_radius,self.patch_radius)
-                patches = self.unet_slice_into_patches(masked_gridded_variable,self.patch_radius,self.patch_radius)
-                del masked_gridded_variable
+                if self.model_type == 'CNN':
+                    patches = self.cnn_slice_into_patches(
+                        gridded_variable_data[hour,v,:,:],self.patch_radius,self.patch_radius)
+                elif self.model_type == 'UNET':
+                    patches = self.unet_slice_into_patches(
+                        gridded_variable_data[hour,v,:,:],self.patch_radius,self.patch_radius)
+                    if patches is None: print(variable,start_date)
                 if np.shape(patches)[0] < 1: continue
                 hourly_patches.append(patches)
             #Shorten variable names
@@ -128,6 +140,7 @@ class DLPreprocessing(object):
             with h5py.File(var_filename, 'w') as hf:
                 hf.create_dataset("data",data=hourly_patches,
                 compression='gzip',compression_opts=6)
+        del gridded_variable_data
         return
 
     def cnn_slice_into_patches(self,data2d, patch_ny, patch_nx):
@@ -155,19 +168,18 @@ class DLPreprocessing(object):
         
         for i in np.arange(0,data2d.shape[0],patch_nx): 
             next_i = i+patch_nx
-            if next_i > data2d.shape[0]:
-                break 
+            if next_i > data2d.shape[0]: break 
             for j in  np.arange(0,data2d.shape[1],patch_ny):
                 next_j = j+patch_ny
-                if next_j > data2d.shape[1]:
-                    break
-                data = data2d[i:next_i,j:next_j]
-                if any(np.isnan(data.flatten())) == True:
-                    continue
-                sliced_data.append(data)
+                if next_j > data2d.shape[1]: break
+                mask_values = self.mask[i:next_i,j:next_j]
+                if all(np.isnan(mask_values.flatten())) == True: continue
+                patch_data = data2d[i:next_i,j:next_j]
+                sliced_data.append(patch_data)
+        del data2d
         return np.array(sliced_data)
     
-    def unet_slice_into_patches(self,data2d,patch_ny,patch_nx,overlap_points=16):
+    def unet_slice_into_patches(self,data2d,patch_ny,patch_nx):
         '''
         A function to slice a 2-dimensional [ny, nx] array into rectangular patches and return 
         the sliced data in an array of shape [npatches, nx_patch, ny_patch].
@@ -182,21 +194,23 @@ class DLPreprocessing(object):
                     nx_patch -- the number of points in the patch (x-dimension)
         '''
         #Determine the step needed for overlaping tiles
-        nstep_y = patch_ny-overlap_points
-        nstep_x = patch_nx-overlap_points
+        nstep_y = patch_ny-self.overlap_size
+        nstep_x = patch_nx-self.overlap_size
         
         #Define array to store sliced data 
         sliced_data = [] 
-        
         for i in np.arange(0,data2d.shape[0],nstep_x): 
             next_i = i+patch_nx
             if next_i > data2d.shape[0]:break 
             for j in np.arange(0,data2d.shape[1],nstep_y):
                 next_j = j+patch_ny
                 if next_j > data2d.shape[1]: break
-                data = data2d[i:next_i,j:next_j]
-                if any(np.isnan(data.flatten())) == True: continue
-                sliced_data.append(data)
+                mask_values = self.mask[i:next_i,j:next_j]
+                if all(np.isnan(mask_values.flatten())) == True: continue
+                patch_data = data2d[i:next_i,j:next_j]
+                if any(np.isnan(patch_data.flatten())) == True: return None
+                sliced_data.append(patch_data)
+        del data2d
         return np.array(sliced_data)
 
 
