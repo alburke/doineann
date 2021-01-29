@@ -15,3 +15,4 @@ dependencies:
     - pip
         - tensorflow
         - netcdf4
+        - git+https://github.com/yingkaisha/keras-unet-collection.git
