@@ -27,7 +27,7 @@ class DLPreprocessing(object):
 
     def process_map_data(self,map_file):
         lon_lat_file = f'{self.hf_path}/{self.ensemble_name}_map_data.h5'
-        if len(glob(lon_lat_file)) < 1: 
+        if len(glob(lon_lat_file)) < 1:  
             proj_dict, grid_dict = read_ncar_map_file(map_file)
             mapping_data = make_proj_grids(proj_dict, grid_dict)
             mapping_lat_data = mapping_data['lat']
@@ -42,7 +42,7 @@ class DLPreprocessing(object):
                     mapping_lon_data,self.patch_radius,self.patch_radius)
                 lat_slices = self.unet_slice_into_patches(
                    mapping_lat_data,self.patch_radius,self.patch_radius)
-            
+
             lon_lat_data = np.array((lon_slices,lat_slices))
             print(f'\nWriting map file: {lon_lat_file}\n')
             with h5py.File(lon_lat_file, 'w') as hf:
@@ -78,10 +78,11 @@ class DLPreprocessing(object):
             if self.model_type == 'CNN':
                 labels = self.cnn_slice_into_patches(gridded_obs_data[hour])
             #Label cnn mrms data
-            elif self.model_type == 'UNET':
+            elif 'UNET' in self.model_type:
                 labels = self.unet_slice_into_patches(
                     gridded_obs_data[hour],self.patch_radius,self.patch_radius)
-            obs_patch_labels.append(labels)
+            #code relationship between Murrillo MESH and Witt MESH
+            obs_patch_labels.append(11.8*(labels**0.362))
         if np.nanmax(obs_patch_labels) <= 0: return 
         obs_filename=f'{self.hf_path}/obs/obs_{run_date.strftime(self.run_date_format)}.h5'
         print(f'Writing obs file: {obs_filename}')

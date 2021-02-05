@@ -144,7 +144,7 @@ class DLDataEngineering(object):
                 member_feature_files = [glob(self.hf_path+f'/{member}/{var}*{str_date}*')[0]
                 for var in self.predictors]
             except: continue
-            print(str_date)
+            #print(str_date)
             #Open obs file
             with h5py.File(obs_file[0],'r') as ohf: obs_data = ohf['data'][()]
             #Get obs labels
@@ -154,14 +154,14 @@ class DLDataEngineering(object):
                         daily_obs.append((str_date,hour,patch,obs_data[hour,patch]))
                     else:
                         max_obs_value = np.nanmax(obs_data[hour,patch])
-                        if max_obs_value > 50.: 
+                        if max_obs_value >= 50.: 
                             daily_obs.append((str_date,hour,patch,3))
-                        elif max_obs_value > 25.: 
+                        elif max_obs_value >= 25.: 
                             daily_obs.append((str_date,hour,patch,2))
-                        elif max_obs_value > 5.: 
+                        elif max_obs_value >= 12.5: 
                             daily_obs.append((str_date,hour,patch,1))
-                        else: 
-                            daily_obs.append((str_date,hour,patch,0))
+                        #else: 
+                        #    daily_obs.append((str_date,hour,patch,0))
             
             del obs_data
         if len(daily_obs) < 1:
@@ -172,14 +172,15 @@ class DLDataEngineering(object):
         total_obs_df = pd.DataFrame(columns=cols)
         for c,category in enumerate(self.class_category.keys()):
             category_examples_num = int(self.class_category[category])
-            print(category, len(daily_obs_df), category_examples_num, 
-                len(daily_obs_df)/category_examples_num)
             category_data = daily_obs_df[daily_obs_df.loc[:,'Obs Label'] == category]
+            print(f'Category: {category},' 
+                f'Desired num examples: {category_examples_num},'
+                f'Actual num examples: {len(category_data)},'
+                f'Ratio: {len(category_data)/category_examples_num}')
             #If not enough obs per category, sample with replacement
             # Otherwise sample without replacement
             if len(category_data) < category_examples_num: category_obs = category_data
-            else: 
-                category_obs = category_data.sample(n=category_examples_num,replace=False)
+            else: category_obs = category_data.sample(n=category_examples_num,replace=False)
             total_obs_df = total_obs_df.append(category_obs,ignore_index=True,sort=True)
         total_obs_df = total_obs_df.sample(frac=1, axis=1).sample(frac=1).reset_index(drop=True)  
         print(total_obs_df)

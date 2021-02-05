@@ -20,8 +20,8 @@ else:
                 "scipy",
                 "matplotlib>=1.5",
                 "xarray",
+                #"tensorflow>2.0",
                 "pygrib",
-                "tensorflow",
                 "h5py",
                 "cartopy"
                 ]
