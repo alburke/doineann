@@ -14,13 +14,13 @@ import argparse
 import os
 import h5py
 
-'''
+
 try: 
     from ncepgrib2 import Grib2Encode, dump
     grib_support = True
 except ImportError("ncepgrib2 not available"):
     grib_support = False   
-'''
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--start", help="Start Date of the model run time steps.")
@@ -71,25 +71,27 @@ def main():
                 date_outpath = outpath#+'grib/'
                 if not os.path.exists(date_outpath): os.makedirs(date_outpath)
                 print("Daily probabilitiy grib files")
-                write_grib2_file(forecast_grid[s,:,:,:],0,24,args.map_file,date,
+                #write_grib2_file(forecast_grid[s,:,:,:],0,24,args.map_file,date,
+                write_grib2_file(forecast_grid,0,24,args.map_file,date,
                     date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),args.ens,smoothing) 
+            
             if args.netcdf_out: 
                 date_outpath = outpath+'netcdf/'
                 if not os.path.exists(date_outpath): os.makedirs(date_outpath)
                 print("Daily probabilitiy nc files")
-                write_netcdf_file(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
+                #write_netcdf_file(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
+                write_netcdf_file(forecast_grid,0,24,date,mapping_data['lon'],
                     mapping_data['lat'],
                     date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),args.ens,smoothing) 
+            
             if args.plot_out: 
                 date_outpath = outpath+'png/'
                 if not os.path.exists(date_outpath): os.makedirs(date_outpath)
                 print("Daily probabilitiy plots")
+                #plot_period_prob(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
                 plot_period_prob(forecast_grid,0,24,date,mapping_data['lon'],
                     mapping_data['lat'],
                     date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),args.ens,smoothing) 
-                #plot_period_prob(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
-                #    mapping_data['lat'],
-                #    date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),args.ens,smoothing) 
                 
                 
             print()
@@ -98,7 +100,8 @@ def main():
                     if args.plot_out:
                         date_outpath = outpath+'png/'
                         print("Hourly probability plots")
-                        plot_period_prob(forecast_grid[s,:,:,:],hour,(hour+4),
+                        #plot_period_prob(forecast_grid[s,:,:,:],hour,(hour+4),
+                        plot_period_prob(forecast_grid,hour,(hour+4),
                             date,mapping_data['lon'],mapping_data['lat'],
                             date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),
                             args.ens,smoothing) 
@@ -106,14 +109,16 @@ def main():
                     if args.grib_out: 
                         date_outpath = outpath+'grib/'
                         print("Hourly probabilitiy grib files")
-                        write_grib2_file(forecast_grid[s,:,:,:],hour,(hour+4),args.map_file,date,
+                        #write_grib2_file(forecast_grid[s,:,:,:],hour,(hour+4),args.map_file,date,
+                        write_grib2_file(forecast_grid,hour,(hour+4),args.map_file,date,
                             date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),
                             args.ens,smoothing) 
                     print()
                     if args.netcdf_out: 
                         date_outpath = outpath+'netcdf/'
                         print("Daily probabilitiy nc files")
-                        write_netcdf_file(forecast_grid[s,:,:,:],hour,(hour+4),date,
+                        #write_netcdf_file(forecast_grid[s,:,:,:],hour,(hour+4),date,
+                        write_netcdf_file(forecast_grid,hour,(hour+4),date,
                             mapping_data['lon'],mapping_data['lat'],
                             date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),
                             args.ens,smoothing) 
