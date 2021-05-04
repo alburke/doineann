@@ -158,10 +158,6 @@ class DLDataEngineering(object):
                         max_obs_value = np.nanmax(obs_data[hour,patch])
                         if max_obs_value >= 50.: 
                             daily_obs.append((str_date,hour,patch,3))
-                        #elif max_obs_value >= 25.: 
-                        #    daily_obs.append((str_date,hour,patch,2))
-                        #elif max_obs_value >= 12.5: 
-                        #    daily_obs.append((str_date,hour,patch,1))
                         #else: 
                         #    daily_obs.append((str_date,hour,patch,0))
             
