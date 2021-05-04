@@ -14,12 +14,13 @@ import argparse
 import os
 import h5py
 
+'''
 try: 
     from ncepgrib2 import Grib2Encode, dump
     grib_support = True
 except ImportError("ncepgrib2 not available"):
     grib_support = False   
-
+'''
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--start", help="Start Date of the model run time steps.")
@@ -43,7 +44,8 @@ def main():
     else: 
         smoothing = 14
         file_label='smoothed'
-    thresholds = np.array([25, 50])
+    #smoothing=0
+    thresholds = np.array([25])
     stride = 1
 
     #Create map grid
@@ -57,8 +59,7 @@ def main():
     for date in forecast_dates:
         outpath=args.out+'{0}/'.format(date.strftime("%Y%m%d"))
         forecast_grid = load_dl_data(date.strftime('%Y%m%d'),
-            args.members.split(","), args.path)
-        
+            args.members.split(","), args.path) 
         #Output files
         if len(forecast_grid[0]) < 1:
             print('No grib hail forecasts found {0}'.format(date.strftime('%Y%m%d')))
@@ -83,9 +84,12 @@ def main():
                 date_outpath = outpath+'png/'
                 if not os.path.exists(date_outpath): os.makedirs(date_outpath)
                 print("Daily probabilitiy plots")
-                plot_period_prob(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
+                plot_period_prob(forecast_grid,0,24,date,mapping_data['lon'],
                     mapping_data['lat'],
                     date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),args.ens,smoothing) 
+                #plot_period_prob(forecast_grid[s,:,:,:],0,24,date,mapping_data['lon'],
+                #    mapping_data['lat'],
+                #    date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),args.ens,smoothing) 
                 
                 
             print()
@@ -113,18 +117,20 @@ def main():
                             mapping_data['lon'],mapping_data['lat'],
                             date_outpath,"NMEP_{0}_{1}mm".format(file_label,size_forecast),
                             args.ens,smoothing) 
-                 
     return
 
 def load_dl_data(forecast_date,members,data_path):
     member_data = []
     for m, member in enumerate(members):
-        filename = glob(data_path + "{1}/{0}*{1}*forecast_grid.h5".format(member,forecast_date))[0]
+        filename = glob(data_path + f"{forecast_date}/{member}*forecast_grid.h5")[0]
         print(filename)
         with h5py.File(filename,'r') as hf:
-            member_data.append(hf['data'][()])
+            size_data = hf['data'][()]
+            thresholded_data = np.where(size_data>10.0,1,0)
+            member_data.append(thresholded_data)
     average_ens_data = np.nanmean(member_data,axis=0)
     print('Maximum value',np.nanmax(average_ens_data))
+    print(np.shape(average_ens_data))
     return np.array(average_ens_data)
 
 def plot_period_prob(forecast_grid,start_time,end_time,date,
@@ -202,6 +208,7 @@ def write_grib2_file(forecast_grid,start_time,end_time,map_file,
         out_path (str): Path to where output grib files are stored
     """
     data = forecast_grid[start_time:end_time,:,:].max(axis=0)
+
     if smoothing > 0: data = gaussian_filter(forecast_grid[start_time:end_time,:,:].max(axis=0),
         smoothing,mode='constant')
     if map_file[-3:] == "map":                                  

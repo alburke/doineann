@@ -83,7 +83,7 @@ class DLDataEngineering(object):
                 #Selecting random patches for training
                 patches = self.training_data_selection(member,train_dates,
                 train_cases_file,model_type)
-            
+
             #Extracting obs labels
             if model_type == 'CNN': 
                 obs_data = patches['Obs Label'].values.astype('int')
@@ -135,16 +135,18 @@ class DLDataEngineering(object):
         daily_obs = []
         #Loop through each date
         for str_date in train_dates: 
+            print(str_date)
             #If there are model or obs files, continue to next date
             obs_file = glob(self.hf_path+f'/obs/*obs*{str_date}*')
             # continue if daily obs file not found
             if len(obs_file) < 1: continue
             # continue if all daily feature files not found
-            try:
-                member_feature_files = [glob(self.hf_path+f'/{member}/{var}*{str_date}*')[0]
-                for var in self.predictors]
-            except: continue
-            print(str_date)
+            data_file = glob(self.hf_path+f'/{member}/*{str_date}*')
+            if len(data_file) < 1: continue
+            with h5py.File(data_file[0],'r') as dhf:
+                data_keys = dhf.keys()
+                if len(data_keys) < len(self.predictors): continue
+            #print(str_date)
             #Open obs file
             with h5py.File(obs_file[0],'r') as ohf: obs_data = ohf['data'][()]
             #Get obs labels
@@ -154,14 +156,14 @@ class DLDataEngineering(object):
                         daily_obs.append((str_date,hour,patch,obs_data[hour,patch]))
                     else:
                         max_obs_value = np.nanmax(obs_data[hour,patch])
-                        if max_obs_value > 50.: 
+                        if max_obs_value >= 50.: 
                             daily_obs.append((str_date,hour,patch,3))
-                        elif max_obs_value > 25.: 
-                            daily_obs.append((str_date,hour,patch,2))
-                        elif max_obs_value > 5.: 
-                            daily_obs.append((str_date,hour,patch,1))
-                        else: 
-                            daily_obs.append((str_date,hour,patch,0))
+                        #elif max_obs_value >= 25.: 
+                        #    daily_obs.append((str_date,hour,patch,2))
+                        #elif max_obs_value >= 12.5: 
+                        #    daily_obs.append((str_date,hour,patch,1))
+                        #else: 
+                        #    daily_obs.append((str_date,hour,patch,0))
             
             del obs_data
         if len(daily_obs) < 1:
@@ -172,14 +174,15 @@ class DLDataEngineering(object):
         total_obs_df = pd.DataFrame(columns=cols)
         for c,category in enumerate(self.class_category.keys()):
             category_examples_num = int(self.class_category[category])
-            print(category, len(daily_obs_df), category_examples_num, 
-                len(daily_obs_df)/category_examples_num)
             category_data = daily_obs_df[daily_obs_df.loc[:,'Obs Label'] == category]
+            print(f'Category: {category},' 
+                f'Desired num examples: {category_examples_num},'
+                f'Actual num examples: {len(category_data)},'
+                f'Ratio: {len(category_data)/category_examples_num}')
             #If not enough obs per category, sample with replacement
             # Otherwise sample without replacement
             if len(category_data) < category_examples_num: category_obs = category_data
-            else: 
-                category_obs = category_data.sample(n=category_examples_num,replace=False)
+            else: category_obs = category_data.sample(n=category_examples_num,replace=False)
             total_obs_df = total_obs_df.append(category_obs,ignore_index=True,sort=True)
         total_obs_df = total_obs_df.sample(frac=1, axis=1).sample(frac=1).reset_index(drop=True)  
         print(total_obs_df)
@@ -237,11 +240,13 @@ class DLDataEngineering(object):
             patches = self.validation_data_selection(member,valid_cases_file)
             
         #Extracting obs labels
+        
         valid_member_label = patches['Obs Label'].values.astype('int64')
         with h5py.File(valid_labels_file, 'w') as hf: 
             hf.create_dataset("data",data=valid_member_label)
         print(f'Writing out {valid_labels_file}')
-            
+        
+
         #Extracting model patches
         valid_member_data=self.read_files(mode,member,patches['Random Date'],patches['Hour']) 
         if valid_member_data is None: 
@@ -327,18 +332,17 @@ class DLDataEngineering(object):
         """
         patch_data = []
         #Start up parallelization
-        pool = Pool(mp.cpu_count())
+        pool = Pool(30) #mp.cpu_count())
 
         print(f'Reading {len(np.unique(dates))} unique {member} date file(s)')
         for d,date in enumerate(np.unique(dates)):
             #Find all model variable files for a given date
             if mode == 'obs':
-                try: extraction_files = glob(self.hf_path+f'/obs/*{date}*.h5')
+                try: extraction_files = glob(self.hf_path+f'/obs/*{date}*.h5')[0]
                 except: continue
             else: 
-                try:
-                    extraction_files = [glob(self.hf_path+f'/{member}/{var}*{date}*')[0]
-                        for var in self.predictors]
+                try: 
+                    extraction_files = glob(self.hf_path+f'/{member}/*{date}*')[0]
                 except: continue
             if d%20 == 0:print(d,date)
             if len(dates) == 1: 
@@ -349,16 +353,16 @@ class DLDataEngineering(object):
                 date_inds = np.where(dates == date)[0]
                 args = (extraction_files,np.array(hour)[date_inds],np.array(patch)[date_inds])
                 patch_data.append(pool.apply_async(self.extract_data,args))
-            
         pool.close()
         pool.join()
         #If there are no data, return None
         if len(patch_data) <1: return None
-        all_patch_data = np.concatenate([pool_file.get() for pool_file in patch_data],axis=0)
+        all_patch_data = [pool_file.get() for pool_file in patch_data]
         del patch_data
-        return all_patch_data
+        return np.concatenate(all_patch_data,axis=0)
+
     
-    def extract_data(self,files,hours=None,patches=None):
+    def extract_data(self,filename,hours=None,patches=None):
         """
         Function to extract training and forecast patch data
 
@@ -371,32 +375,24 @@ class DLDataEngineering(object):
         Returns: 
             Extracted data 
         """
-        data = []
-        for filename in files:
-            h5 = h5py.File(filename,'r')
-            compressed_data = h5['data']
-            if hours is None and patches is None:
-                data.append(compressed_data[()])
-            else:
-                hourly_data = np.array([  
-                        compressed_data[hours[i],patches[i],:,:] 
-                        for i in np.arange(len(hours))
-                        ])
-                if 'obs' in filename: return np.array(hourly_data)
-                if hourly_data.shape[0] == len(hours): 
-                    data.append(hourly_data.reshape(-1,*hourly_data.shape[-2:]))
-                else: data.append(hourly_data)
-                del hourly_data
-            del compressed_data
-            h5.close()
-        # Move variables to last dimension
-        reshaped_data = np.empty( (np.shape(data)[1:]+(np.shape(data)[0],)) )*np.nan
-        for v in np.arange(np.shape(data)[0]): 
-            if len(np.shape(data)) == 4:
-                reshaped_data[:,:,:,v] = data[v]
-            elif len(np.shape(data)) == 5:
-                reshaped_data[:,:,:,:,v] = data[v]
-        del data
+        h5 = h5py.File(filename,'r')
+        compressed_data = np.array([h5[variable] for variable in h5.keys()])
+        h5.close()
+        if hours is None and patches is None:
+            reshaped_data = np.moveaxis(compressed_data,0,-1)
+            return reshaped_data
+        if np.ndim(compressed_data) < 5:  
+            hourly_data = np.array([
+                compressed_data[hours[example],patches[example],:,:] 
+                for example in np.arange(len(hours))])
+            reshaped_data = hourly_data
+        else:  
+            hourly_data = np.array([
+            compressed_data[:,hours[example],patches[example],:,:] 
+                for example in np.arange(len(hours))])
+            reshaped_data = np.moveaxis(hourly_data, 1, -1)
+        del hourly_data
+        del compressed_data
         return reshaped_data
 
     def standardize_data(self,member,model_data,
@@ -425,10 +421,10 @@ class DLDataEngineering(object):
             print(f'Writing out {scaling_file}')
             scaling_values.to_csv(scaling_file)
             
-        min_max_values = (scaling_values['max'] - scaling_values['min']).values
+        min_max_values = (scaling_values['max'] - scaling_values['min']).values 
         standard_model_data = (model_data - scaling_values['min'].values)/min_max_values
         del model_data
-
+        print('Data Standardized')
         print(np.nanmax(standard_model_data), np.nanmin(standard_model_data))
-        return standard_model_data
+        return np.array(standard_model_data)
     

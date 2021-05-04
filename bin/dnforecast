@@ -5,6 +5,7 @@ from scipy.spatial import cKDTree
 from util.Config import Config
 from glob import glob
 import pandas as pd
+import xarray as xr
 import numpy as np
 import argparse
 import h5py
@@ -60,13 +61,12 @@ def main():
     #Predict using trained DL models
     elif args.fore:
         total_map_shape,subset_map_shape,patch_map_conversion_indices,lon_grid,lat_grid = forecast_map_info(config)        
-        #total_map_shape,subset_map_shape,patch_map_conversion_indices = forecast_map_info(config)        
         for date in forecast_dates:
             for member in config.ensemble_members:
                 print('\nPredicting {0} {1} data'.format(member,date))
                 dlmodel.predict_model(member,patch_map_conversion_indices,total_map_shape,subset_map_shape,
                     [date],config.patch_radius,config.forecast_grid_path,lon_grid,lat_grid)
-                    #[date],config.patch_radius,config.forecast_grid_path)
+        
     return
 
 
@@ -83,25 +83,24 @@ def forecast_map_info(config):
     #del mapping_data
 
     #Open mapfile over subset domain (CONUS)
-    subset_map_file = glob(config.hf_path+'/*map*.h5')[0] 
+    subset_map_file = config.hf_path+'/HREFv2_map_data.h5'
     
     with h5py.File(subset_map_file,'r') as hf: 
         subset_map_data = hf['data'][()]
     subset_map_shape = subset_map_data.shape
 
     patch_map_conversion_indices = []
-    #overlap_pts = 16 
+    overlap_pts = 4
     for patch in np.arange(subset_map_data.shape[1]):
         #Convert patch grid points to total grid using cKDtree
         _,map_conversion_inds = tree.query(
-            np.c_[subset_map_data[0,patch,:,:].ravel(),subset_map_data[1,patch,:,:].ravel()])
-            #np.c_[subset_map_data[0,patch,overlap_pts:-overlap_pts,overlap_pts:-overlap_pts].ravel(),
-            #subset_map_data[1,patch,overlap_pts:-overlap_pts,overlap_pts:-overlap_pts].ravel()])
+            #np.c_[subset_map_data[0,patch,:,:].ravel(),subset_map_data[1,patch,:,:].ravel()])
+            np.c_[subset_map_data[0,patch,overlap_pts:-overlap_pts,overlap_pts:-overlap_pts].ravel(),
+            subset_map_data[1,patch,overlap_pts:-overlap_pts,overlap_pts:-overlap_pts].ravel()])
         patch_map_conversion_indices.append(map_conversion_inds)
     print(np.shape(patch_map_conversion_indices))
     del subset_map_data
     return total_map_shape,subset_map_shape,patch_map_conversion_indices,mapping_data['lon'],mapping_data['lat']
-    #return mapping_data,total_map_shape,subset_map_shape,patch_map_conversion_indices
 
 if __name__ == "__main__":
     __spec__ = None

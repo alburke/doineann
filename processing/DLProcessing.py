@@ -9,7 +9,7 @@ import os
 class DLPreprocessing(object):
     def __init__(self,train,ensemble_name,model_path,
         hf_path,patch_radius,overlap_size,run_date_format,
-        predictors,start_hour,end_hour,model_type,mask=None):
+        predictors,start_hour,end_hour,model_type,mode,mask=None):
         
         self.train = train
         self.ensemble_name = ensemble_name
@@ -23,11 +23,24 @@ class DLPreprocessing(object):
         self.end_hour=end_hour
         self.mask = mask
         self.model_type = model_type
+        self.mode=mode
+        
+        
+        self.variable_names = []
+        for v,variable in enumerate(self.predictors):
+            #Shorten variable names
+            if "_" in variable: 
+                name = variable.split('_')[0].upper() + variable.split('_')[-1]
+            elif " " in variable: 
+                name= ''.join([v[0].upper() for v in variable.split()])
+            else: name = variable
+            self.variable_names.append(name)
+        
         return
 
     def process_map_data(self,map_file):
         lon_lat_file = f'{self.hf_path}/{self.ensemble_name}_map_data.h5'
-        if len(glob(lon_lat_file)) < 1: 
+        if len(glob(lon_lat_file)) < 1:  
             proj_dict, grid_dict = read_ncar_map_file(map_file)
             mapping_data = make_proj_grids(proj_dict, grid_dict)
             mapping_lat_data = mapping_data['lat']
@@ -42,7 +55,7 @@ class DLPreprocessing(object):
                     mapping_lon_data,self.patch_radius,self.patch_radius)
                 lat_slices = self.unet_slice_into_patches(
                    mapping_lat_data,self.patch_radius,self.patch_radius)
-            
+
             lon_lat_data = np.array((lon_slices,lat_slices))
             print(f'\nWriting map file: {lon_lat_file}\n')
             with h5py.File(lon_lat_file, 'w') as hf:
@@ -78,10 +91,12 @@ class DLPreprocessing(object):
             if self.model_type == 'CNN':
                 labels = self.cnn_slice_into_patches(gridded_obs_data[hour])
             #Label cnn mrms data
-            elif self.model_type == 'UNET':
+            elif 'UNET' in self.model_type:
                 labels = self.unet_slice_into_patches(
                     gridded_obs_data[hour],self.patch_radius,self.patch_radius)
-            obs_patch_labels.append(labels)
+            #code relationship between Murrillo MESH and Witt MESH
+            refit_labels = refit_MESH(labels)
+            obs_patch_labels.append(refit_labels)
         if np.nanmax(obs_patch_labels) <= 0: return 
         obs_filename=f'{self.hf_path}/obs/obs_{run_date.strftime(self.run_date_format)}.h5'
         print(f'Writing obs file: {obs_filename}')
@@ -114,7 +129,17 @@ class DLPreprocessing(object):
         if gridded_variable_data is None: 
             print(f'No {run_date} {member} data') 
             return
-        for v,variable in enumerate(self.predictors):
+
+        ens_file = f'{member_path}/{member}/{member}_{run_date.strftime(self.run_date_format)}.h5' 
+        hf = h5py.File(ens_file, 'w')
+        if self.mode == 'forecast': 
+            hf.create_dataset('data',data=gridded_variable_data,
+                compression='gzip',compression_opts=6)
+            print(f'Writing forecast model file: {ens_file}')
+            del gridded_variable_data
+            return
+    
+        for v,variable in enumerate(self.variable_names):
             hourly_patches = [] 
             #Slice hourly data
             for hour in np.arange(gridded_variable_data.shape[0]):
@@ -127,19 +152,10 @@ class DLPreprocessing(object):
                     if patches is None: print(variable,start_date)
                 if np.shape(patches)[0] < 1: continue
                 hourly_patches.append(patches)
-            #Shorten variable names
-            if "_" in variable: 
-                variable_name=variable.split('_')[0].upper() + variable.split('_')[-1]
-            elif " " in variable: 
-                variable_name= ''.join([v[0].upper() for v in variable.split()])
-            else: variable_name = variable
-            var_filename = '{0}/{2}/{1}_{2}_{3}.h5'.format(member_path,
-                variable_name,member,run_date.strftime(self.run_date_format)) 
-            print(f'Writing model file: {var_filename}')
             #Write file out using Hierarchical Data Format 5 (HDF5) format. 
-            with h5py.File(var_filename, 'w') as hf:
-                hf.create_dataset("data",data=hourly_patches,
+            hf.create_dataset(variable,data=hourly_patches,
                 compression='gzip',compression_opts=6)
+        print(f'Writing training model file: {ens_file}')
         del gridded_variable_data
         return
 
@@ -245,3 +261,16 @@ class DLPreprocessing(object):
                 label = 0
             obs_labels.append(label)
         return obs_labels
+
+def refit_MESH(data,percentile=95):
+    if percentile == 95: 
+        x = 17.270
+        y = 0.272
+    elif percentile == 75:
+        x = 16.566
+        y = 0.181
+    else:
+        print("Percentile unknown, use 75  or 95")
+        return
+    return x*((data/2.54)**(y/0.5))
+    

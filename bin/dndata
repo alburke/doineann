@@ -25,7 +25,7 @@ def main():
     required = ['dates','start_hour','end_hour','ensemble_members','model_path', 
                 'ensemble_name','mrms_path','mrms_variable','predictors',
                 'model_map_file','hf_path','patch_radius','overlap_size',
-                'model_type','train']
+                'model_type','train','mode']
     #Add attributes of dict to config
     config = Config(args.config, required_attributes=required)
     if not hasattr(config, "run_date_format"):
@@ -43,14 +43,14 @@ def main():
         config.model_path,config.hf_path,config.patch_radius,
         config.overlap_size,config.run_date_format,
         config.predictors,config.start_hour,config.end_hour,
-        config.model_type,config.mask)
+        config.model_type,config.mode,config.mask)
 
     #Process map data
     dlprocess.process_map_data(config.model_map_file)
-
+    
     #Process obs and ensemble data with parallelization
     if args.obs or config.train is True:
-        pool = Pool(mp.cpu_count())
+        pool = Pool(25) #mp.cpu_count())
         for run_date in config.dates:
             pool.apply_async(dlprocess.process_observational_data,
             (run_date,config.mrms_variable,config.mrms_path))
@@ -65,6 +65,7 @@ def main():
                 (run_date,member,config.hf_path,config.model_map_file))
         pool.close()
         pool.join()
+    
     return
 
 if __name__ == "__main__":
