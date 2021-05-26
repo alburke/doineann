@@ -25,8 +25,6 @@ import cartopy
 
 from keras_unet_collection import models, base, utils
 
-
-
 class DLModeler(object):
     def __init__(self,model_path,hf_path,num_examples,
         class_percentages,predictors,model_args,
@@ -78,21 +76,21 @@ class DLModeler(object):
         #valid_data, valid_label = self.dldataeng.extract_validation_data(member,valid_dates,self.model_type)
         valid_data, valid_label = [],[]
     
-        '''
         if self.model_type == 'CNN':
             onehot_encoder = OneHotEncoder(sparse=False,categories='auto')
             encoded_label = onehot_encoder.fit_transform(train_label.reshape(-1, 1))
             self.train_CNN(member,train_data,encoded_label,valid_data,valid_label)
 
         elif 'UNET' in self.model_type:
+            #train_label[train_label >= 50.] = 50. 
+            #log_train_label = np.log((train_label+1.0))
             self.train_UNET(member,train_data,train_label,valid_data,valid_label)
-        '''
+        
         return 
 
     def train_UNET(self,member,trainX,trainY,validX,validY):
         
-        model_file = self.model_path + f'/{member}_{self.model_args}_UNET.h5'
-        print(model_file)
+        model_file = self.model_path + f'/{member}_{self.model_args}_{self.model_type}.h5'
         
         '''
         if os.path.exists(model_file):
@@ -114,47 +112,49 @@ class DLModeler(object):
                 'unpool':False, 'name':f'{self.model_type}'}
         
         if self.model_type == 'UNET':
-            model_obj_params['filter_num'] = [16, 32, 64, 128, 256]
+            model_obj_params['filter_num'] = [16, 32, 64, 128]# 256]
             unet_model_obj = models.unet_2d
-            compile_params = {'loss': dice_loss}
-        elif self.model_type in ['UNET++', 'UNET3+']:  
-            plus_model_params = {'filter_num_down':[16, 32, 64, 128, 256],
-                'filter_num_skip':'auto', 'filter_num_aggregate':'auto',
-                'deep_supervision':True}
-            model_obj_params.update(plus_model_params)
-            compile_params = {'loss': [dice_loss,dice_loss,dice_loss,dice_loss,dice_loss],
-            'loss_weights':[0.25, 0.25, 0.25, 0.25, 1.0]}
-            if self.model_type == 'UNET++': unet_model_obj = models.unet_plus_2d
-            elif self.model_type == 'UNET3+': unet_model_obj = models.unet_3plus_2d
+            compile_params = {'loss': 'mean_squared_error'}
         
+        else:
+            compile_params = {'loss': ['mean_squared_error',
+                'mean_squared_error','mean_squared_error',
+                'mean_squared_error','mean_squared_error'],
+                'loss_weights':[0.25, 0.25, 0.25, 0.25, 1.0]}
+            if self.model_type == 'UNET2plus': 
+                plus_model_params = {'filter_num':[16, 32, 64, 128, 256],
+                    'deep_supervision':True}
+                model_obj_params.update(plus_model_params)
+                unet_model_obj = models.unet_plus_2d
+
+            elif self.model_type == 'UNET3plus': 
+                plus_model_params = {'filter_num_downi':[16, 32, 64, 128, 256],
+                    'filter_num_skip':'auto', 'filter_num_aggregate':'auto',
+                    'deep_supervision':True}
+                model_obj_params.update(plus_model_params)
+                unet_model_obj = models.unet_3plus_2d
+     
         try: unet_model = unet_model_obj(**model_obj_params)
         except: 
             print(f"{self.model_type} Model type not found.")
             return
         
-            #loss=[
-            #dice_loss,dice_loss,dice_loss,dice_loss,dice_loss],
-            #loss_weights=[0.25, 0.25, 0.25, 0.25, 1.0],
-        unet_model.compile(**compile_params,
-            optimizer=tf.keras.optimizers.Adam(lr=1e-4))
+        unet_model.compile(**compile_params,optimizer=tf.keras.optimizers.Adam(lr=1e-4))
         print(unet_model.summary())
          
         #Augment data
-        '''
         aug = ImageDataGenerator(
-                #rotation_range=10,zoom_range=0.15,
+                rotation_range=10,zoom_range=0.15,
                 width_shift_range=0.2,height_shift_range=0.2,
                 fill_mode="nearest")
-        ''' 
         #Fit UNET
-        n_epochs = 2
-        bs = 500
+        n_epochs = 15
+        bs = 256
         
-        #train_generator = aug.flow(trainX,trainY,batch_size=bs)
-        conv_hist = unet_model.fit(trainX,trainY,batch_size=bs,
+        conv_hist = unet_model.fit(
+            aug.flow(trainX,trainY,batch_size=bs),
+            steps_per_epoch=len(trainX)/bs,
             epochs=n_epochs,verbose=1) 
-        #train_generator,epochs=n_epochs,verbose=1) 
-        
         '''
         pred_s = trainX[0].reshape(1,input_shape[0],
         input_shape[1],input_shape[2])
@@ -305,14 +305,25 @@ class DLModeler(object):
         tf.keras.backend.clear_session()
         
         #Load DL model
-        model_file = self.model_path + f'/{member}_{self.model_args}_UNET.h5'
+        model_file = self.model_path + f'/{member}_{self.model_args}_{self.model_type}.h5'
         DL_model = tf.keras.models.load_model(model_file,compile=False) 
+        
+        if self.model_type == 'CNN':
+            #Use minimum prob threshold chosen with validation data
+            threshold_file = self.model_path + f'/{member}_{self.model_args}_CNN_model_threshold.h5'
+            if not os.path.exists(threshold_file):
+                print('No thresholds found')
+                return 
+            prob_thresh = 0 #pd.read_csv(threshold_file).loc[0,'size_threshold']+0.05
+            print(prob_thresh)    
+            total_count = 0
         
         ################## 
         #Extract forecast data (#hours, #patches, nx, ny, #variables)
         ################## 
+        
         forecast_data = self.dldataeng.read_files('forecast',member,date,[None],[None])
-
+        
         if forecast_data is None: 
             print('No forecast data found')
             return
@@ -323,34 +334,53 @@ class DLModeler(object):
         
         standard_forecast_data = np.array([self.dldataeng.standardize_data(member,forecast_data[hour]) 
             for hour in np.arange(forecast_data.shape[0])])
+        
         del forecast_data
         ################## 
         # Produce gridded hourly hail forecast 
         ################## 
-        
+
         total_grid = np.empty( (standard_forecast_data.shape[0],
             total_map_shape[0]*total_map_shape[1]) )*np.nan
-        print(total_grid.shape)
+
         for hour in np.arange(standard_forecast_data.shape[0]):
-            sliced_DL_prediction = np.array(DL_model.predict(standard_forecast_data[hour]))
-            print(sliced_DL_prediction.shape)
-            if self.model_type == 'UNET':
+            print(hour)
+            #Predict probability of severe hail
+            DL_prediction = np.array(DL_model.predict(standard_forecast_data[hour]))
+            ######
+            # Will need to fix CNN code to reflect the conversion inds are in 
+            #patches x (patch_radius*patch_radius) instead of (patches*radius*radius)
+            #####
+            if self.model_type == 'CNN':
+                severe_proba_indices = np.where( (cnn_preds[:,2]+cnn_preds[:,3]) >= prob_thresh)[0]
+                severe_patches = np.zeros(subset_map_shape)
+                #If no hourly severe hail predicted, continue
+                if len(severe_proba_indices) <1 : continue
+                severe_patches[severe_proba_indices] = np.full((patch_radius,patch_radius), 1)
+                total_grid[hour,map_conversion_inds] = severe_patches.ravel()
+                print(hour,len(severe_proba_indices),np.nanmax((cnn_preds[:,2]+cnn_preds[:,3])))
+                total_count += len(severe_proba_indices)
+                print('Total severe probs:',total_count)
+                print()
+            elif 'UNET' in self.model_type:
                 for patch in np.arange(standard_forecast_data.shape[1]):
                     patch_indices = patch_map_conversion_indices[patch]
                     #Gets rid of overlapping edges
                     overlap_pt = 4
                     # If unet3+ then the last output tensor is the correct one
-                    hourly_patch_data = sliced_DL_prediction[patch,overlap_pt:-overlap_pt,
-                        overlap_pt:-overlap_pt,0].ravel()
+                    if DL_prediction.ndim > 4:
+                        hourly_patch_data = DL_prediction[-1,patch,overlap_pt:-overlap_pt,
+                            overlap_pt:-overlap_pt,0].ravel()
+                    else:
+                        hourly_patch_data = DL_prediction[patch,overlap_pt:-overlap_pt,
+                            overlap_pt:-overlap_pt,0].ravel()
                     total_grid[hour,patch_indices] = hourly_patch_data
-         
-        del sliced_DL_prediction
+        del DL_prediction
         del standard_forecast_data
         output_data=total_grid.reshape((total_grid.shape[0],)+total_map_shape)
-        print(output_data.shape)
-        print(np.nanmax(output_data))
-
+        
         date_outpath = forecast_grid_path + f'{date[0][:-5]}/'
+        
         #Output gridded forecasts
         if not os.path.exists(date_outpath): os.makedirs(date_outpath)
         gridded_out_file = date_outpath + f'{member}_{date[0]}_forecast_grid.h5'
@@ -358,18 +388,6 @@ class DLModeler(object):
         with h5py.File(gridded_out_file, 'w') as hf: 
             hf.create_dataset("data",data=output_data,
             compression='gzip',compression_opts=6)
-        
-        '''
-        fig = plt.figure()
-        ax = fig.add_subplot(1,1,1,projection = ccrs.LambertConformal())
-        ax.add_feature(cf.COASTLINE)   
-        ax.add_feature(cf.OCEAN)
-        ax.add_feature(cf.BORDERS,linestyle='-')
-        ax.add_feature(cf.STATES.with_scale('50m'),linestyle='-',edgecolor='black')
-        plt.contourf(lon_grid,lat_grid,output_data[0,:,:],transform=ccrs.PlateCarree())
-        plt.colorbar()
-        plt.show()
-        '''
         
         return
 
